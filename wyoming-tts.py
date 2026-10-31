@@ -184,18 +184,35 @@ class MultiLangG2P:
 def process_text_with_misaki(g2p, text: str) -> np.ndarray:
     """
     使用 misaki 将文本转换为 Kokoro 模型所需的 token ID 序列。
+    兼容处理 misaki 返回的元组 (phonemes, tokens)、字符串或列表形式。
     """
-    phoneme_parts: List[str] = []
+    res = g2p(text)
 
-    for _graphemes, phonemes in g2p(text):
-        if phonemes is not None:
-            phoneme_parts.append(phonemes)
-
-    phoneme_str = "".join(phoneme_parts)
+    # 1. 若返回 (phonemes, tokens) 元组（misaki.en 的标准输出）
+    if isinstance(res, tuple):
+        phoneme_str = res[0] if res else ""
+    # 2. 若直接返回音素字符串（misaki.zh / ja 常见输出）
+    elif isinstance(res, str):
+        phoneme_str = res
+    # 3. 若返回列表（部分分段处理输出）
+    elif isinstance(res, list):
+        parts = []
+        for item in res:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, tuple) and len(item) >= 2:
+                parts.append(item[1] if item[1] is not None else "")
+            elif isinstance(item, tuple) and len(item) == 1:
+                parts.append(str(item[0]))
+        phoneme_str = "".join(parts)
+    else:
+        phoneme_str = str(res)
 
     if not phoneme_str:
         logger.warning("文本 '%s' 未能提取出有效音素", text)
         return np.array([[0, 0]], dtype=np.int64)
+
+    logger.debug("音素转换结果: %s -> %s", text, phoneme_str)
 
     # 逐字符查表转换为 token ID
     token_ids = [0] + [VOCAB.get(c, 0) for c in phoneme_str] + [0]
@@ -532,9 +549,24 @@ class TTSEventHandler(AsyncEventHandler):
         speed: np.ndarray,
     ) -> bytes:
         """执行 OpenVINO 模型推理。"""
-        output = self.compiled_model(
-            {"tokens": tokens, "style": style, "speed": speed}
-        )
+        # 自适应匹配模型输入端口
+        inputs = {}
+        for inp in self.compiled_model.inputs:
+            name = inp.get_any_name().lower()
+            if "token" in name or "input" in name or "id" in name:
+                inputs[inp] = tokens
+            elif "style" in name or "ref" in name:
+                inputs[inp] = style
+            elif "speed" in name:
+                inputs[inp] = speed
+            else:
+                inputs[inp] = tokens
+
+        # 若端口未匹配到任何名称，采用常规字典回退
+        if not inputs:
+            inputs = {"tokens": tokens, "style": style, "speed": speed}
+
+        output = self.compiled_model(inputs)
 
         audio = output[self.compiled_model.output(0)]
         audio = np.squeeze(audio)
