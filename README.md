@@ -37,6 +37,7 @@ Wyoming 协议 + OpenVINO 推理引擎：在 Intel 独立显卡（Arc）、核�
 pip install -r requirements-stt.txt
 
 # 场景 B: 仅运行 TTS (语音合成) 服务（含 Kokoro、PyTorch 音色解析及中/英/日多语言分词依赖）
+# 依赖含: pyopenjtalk, fugashi, unidic-lite, pypinyin, spacy 等
 pip install -r requirements-tts.txt
 
 # 场景 C: 同时运行 STT 和 TTS

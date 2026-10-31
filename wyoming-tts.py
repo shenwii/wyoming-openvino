@@ -183,7 +183,7 @@ class MultiLangG2P:
             install_hint = {
                 "zh": "pip install ordered-set pypinyin pypinyin-dict jieba cn2an",
                 "en": "pip install spacy num2words",
-                "ja": "pip install fugashi unidic-lite jaconv mojimoji",
+                "ja": "pip install pyopenjtalk fugashi unidic-lite jaconv mojimoji",
             }.get(lang, f"pip install 'misaki[{lang}]'")
 
             err_msg = (

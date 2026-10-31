@@ -26,6 +26,7 @@ jieba
 cn2an
 
 # ---- 日文 (ja) 语言包依赖 ----
+pyopenjtalk
 fugashi
 unidic-lite
 jaconv
