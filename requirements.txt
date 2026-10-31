@@ -1,0 +1,24 @@
+# ===========================================================================
+# Wyoming OpenVINO - 依赖清单
+# ===========================================================================
+# 本项目将 OpenVINO 加速的 STT/TTS 模型通过 Wyoming 协议对接 Home Assistant，
+# 使 Whisper / Kokoro 等模型可以在 Intel GPU 上高效运行。
+# ===========================================================================
+
+# Wyoming 协议库（与 Home Assistant 语音助手通信）
+wyoming>=1.5.0
+
+# Intel OpenVINO 推理引擎（TTS 模型推理）
+openvino>=2024.0
+
+# OpenVINO GenAI 推理管线（Whisper STT 推理）
+openvino-genai>=2024.0
+
+# Kokoro TTS 文本前端（文本 → IPA 音素转换）
+misaki
+
+# 数值计算
+numpy>=1.24.0
+
+# 命令行参数解析
+typer>=0.9.0
