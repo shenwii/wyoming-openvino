@@ -247,6 +247,8 @@ def main(
             AsrProgram(
                 name="wyoming-openvino-stt",
                 description=f"基于 OpenVINO 的 {model_name} 多语言语音识别服务 (支持自动检测及中/英/日等)",
+                installed=True,
+                version="1.0.0",
                 models=[
                     AsrModel(
                         name=model_name,
@@ -256,6 +258,8 @@ def main(
                             name="OpenAI Whisper (OpenVINO)",
                             url="https://github.com/openai/whisper",
                         ),
+                        installed=True,
+                        version="1.0.0",
                     )
                 ],
                 attribution=Attribution(

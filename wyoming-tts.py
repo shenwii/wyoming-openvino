@@ -594,6 +594,11 @@ def main(
     g2p_manager = MultiLangG2P(fallback_language="zh" if default_lang == "auto" else default_lang)
 
     # ---- 自动扫描所有声音并构建 Wyoming 服务信息 ----
+    tts_attribution = Attribution(
+        name="Kokoro TTS (OpenVINO)",
+        url="https://github.com/hexgrad/kokoro",
+    )
+
     tts_voices: List[TtsVoice] = []
     for v in all_voice_names:
         prefix = v[0].lower() if v else ""
@@ -603,6 +608,9 @@ def main(
                 name=v,
                 description=f"{v} ({v_lang})",
                 languages=[v_lang],
+                attribution=tts_attribution,
+                installed=True,
+                version="1.0.0",
             )
         )
 
@@ -611,11 +619,10 @@ def main(
             TtsProgram(
                 name="wyoming-openvino-tts",
                 description=f"基于 OpenVINO 的 {model_name} 多语言语音合成服务 (中/英/日等)",
+                installed=True,
+                version="1.0.0",
                 voices=tts_voices,
-                attribution=Attribution(
-                    name="Kokoro TTS (OpenVINO)",
-                    url="https://github.com/hexgrad/kokoro",
-                ),
+                attribution=tts_attribution,
             )
         ],
     )
