@@ -116,17 +116,26 @@ class MultiLangG2P:
                     raise ImportError("无法在 misaki.zh 中找到 ZHG2P 类")
                 logger.info("已加载中文 G2P 引擎 (misaki.zh.%s)", cls.__name__)
 
-                # 极速轻量英文回调，带 LRU 缓存，避免重复调用 spaCy 带来巨大延迟
+                # 优化英文单词回调：首尾确保空格隔离，避免音素与相邻汉字拼音粘连；带 LRU 高速缓存
                 @lru_cache(maxsize=512)
                 def fast_en_callable(w: str) -> str:
+                    w = w.strip()
+                    if not w:
+                        return ""
                     try:
                         en_engine = self.get_g2p("en")
                         res = en_engine(w)
-                        return res[0] if isinstance(res, tuple) else str(res)
+                        phonemes = res[0] if isinstance(res, tuple) else str(res)
+                        # 在英文音标前后保留空格，确保与汉字声调拼音自然断开
+                        return f" {phonemes.strip()} "
                     except Exception:
-                        return w
+                        return f" {w} "
 
-                return cls(en_callable=fast_en_callable)
+                # 优先采用官方推荐的 version="1.1"（对中英混排有完整优化）
+                try:
+                    return cls(version="1.1", en_callable=fast_en_callable)
+                except TypeError:
+                    return cls(en_callable=fast_en_callable)
 
             elif lang == "en":
                 from misaki import en
@@ -210,13 +219,29 @@ class MultiLangG2P:
         return self.fallback_language or "zh"
 
 
-def split_text_into_chunks(text: str, max_chunk_chars: int = 220) -> List[str]:
+def normalize_mixed_text(text: str) -> str:
     """
-    将长文本智能按中英文句号、分号、问号、感叹号、换行符切分为自然的语音分句。
-    确保单次进入模型的文本不会超出 Kokoro 的 512 token 上下文限制，
-    同时使首句音频可以在几百毫秒内即时输出，消除长时间卡顿。
+    对中英文混合文本进行预清洗：
+    1. 在中文字符与英文单词交界处自动补全空格，避免发音黏连；
+    2. 将常见的 2~4 位全大写缩写词（如 AI, CPU, GPU, TTS）展开为按字母读音（如 A I, C P U）。
     """
-    text = text.strip()
+    # 中英文边界补空格
+    text = re.sub(r"([\u4e00-\u9fa5])([a-zA-Z])", r"\1 \2", text)
+    text = re.sub(r"([a-zA-Z])([\u4e00-\u9fa5])", r"\1 \2", text)
+    # 大写缩写展开（如 AI -> A I）
+    text = re.sub(r"\b([A-Z]{2,4})\b", lambda m: " ".join(list(m.group(1))), text)
+    return text
+
+
+def split_text_into_chunks(text: str, max_chunk_chars: int = 70) -> List[str]:
+    """
+    将长文本智能按中英文句号、分号、问号、感叹号、换行符切分为自然的语音分句（默认约50-70字/句）。
+    优势:
+      1. 确保单次推理耗时极短（仅需 1~2 秒即可输出第一句）；
+      2. Wyoming 流式首句秒级即时发声，彻底消除整篇等待 13 秒的停顿感；
+      3. 确保任何大长文本绝不会超出 Kokoro 的 512 上下文限制。
+    """
+    text = normalize_mixed_text(text.strip())
     if not text:
         return []
 
@@ -793,7 +818,12 @@ def main(
     logger.info("正在加载并编译模型: %s (设备: %s)", resolved_model_file, device)
 
     model = core.read_model(str(resolved_model_file))
-    ov_config = {"PERFORMANCE_HINT": "LATENCY"}
+    import os
+    cpu_cores = min(os.cpu_count() or 4, 8)
+    ov_config = {
+        "PERFORMANCE_HINT": "LATENCY",
+        "INFERENCE_NUM_THREADS": str(cpu_cores),
+    }
     try:
         compiled_model = core.compile_model(model, device, config=ov_config)
         logger.info("模型编译成功 (设备: %s, 模式: LATENCY)", device)

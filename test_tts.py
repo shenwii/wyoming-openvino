@@ -97,9 +97,14 @@ def main(
     print(f"🎙️  使用声音: {voice_name}")
 
     # 2. 编译模型
+    import os
     core = ov.Core()
     model = core.read_model(str(model_file))
-    compiled_model = core.compile_model(model, device)
+    ov_config = {
+        "PERFORMANCE_HINT": "LATENCY",
+        "INFERENCE_NUM_THREADS": str(min(os.cpu_count() or 4, 8)),
+    }
+    compiled_model = core.compile_model(model, device, config=ov_config)
 
     # 3. 初始化 G2P 并转换音素
     g2p_manager = MultiLangG2P(fallback_language="zh" if language == "auto" else language)
