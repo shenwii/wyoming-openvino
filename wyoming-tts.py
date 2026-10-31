@@ -24,8 +24,9 @@ import asyncio
 import io
 import logging
 import re
+import time
 import wave
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -114,12 +115,18 @@ class MultiLangG2P:
                 if cls is None:
                     raise ImportError("无法在 misaki.zh 中找到 ZHG2P 类")
                 logger.info("已加载中文 G2P 引擎 (misaki.zh.%s)", cls.__name__)
-                # 尝试关联英文 G2P 以支持中英混合发音
-                try:
-                    en_g2p = self.get_g2p("en")
-                    return cls(en_callable=en_g2p)
-                except Exception:
-                    return cls()
+
+                # 极速轻量英文回调，带 LRU 缓存，避免重复调用 spaCy 带来巨大延迟
+                @lru_cache(maxsize=512)
+                def fast_en_callable(w: str) -> str:
+                    try:
+                        en_engine = self.get_g2p("en")
+                        res = en_engine(w)
+                        return res[0] if isinstance(res, tuple) else str(res)
+                    except Exception:
+                        return w
+
+                return cls(en_callable=fast_en_callable)
 
             elif lang == "en":
                 from misaki import en
@@ -203,7 +210,7 @@ class MultiLangG2P:
         return self.fallback_language or "zh"
 
 
-def split_text_into_chunks(text: str, max_chunk_chars: int = 120) -> List[str]:
+def split_text_into_chunks(text: str, max_chunk_chars: int = 220) -> List[str]:
     """
     将长文本智能按中英文句号、分号、问号、感叹号、换行符切分为自然的语音分句。
     确保单次进入模型的文本不会超出 Kokoro 的 512 token 上下文限制，
@@ -589,11 +596,13 @@ class TTSEventHandler(AsyncEventHandler):
         """
         使用 OpenVINO Kokoro 模型进行多语言语音合成。
         """
+        t0 = time.perf_counter()
         target_lang = language or self.default_language or "zh"
         g2p = self.g2p_manager.get_g2p(target_lang)
 
         # 文本 → 音素 token IDs（传入官方精准 vocab 字典）
         tokens = process_text_with_misaki(g2p, text, vocab=self.vocab)
+        t_g2p = time.perf_counter() - t0
 
         # 获取声音风格向量
         v_name = voice_name or self.default_voice_name
@@ -624,6 +633,7 @@ class TTSEventHandler(AsyncEventHandler):
         speed_array = np.array([self.speed], dtype=np.float32)
 
         # 在线程池中执行推理
+        t_infer_start = time.perf_counter()
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
@@ -631,6 +641,16 @@ class TTSEventHandler(AsyncEventHandler):
             tokens,
             style,
             speed_array,
+        )
+        t_infer = time.perf_counter() - t_infer_start
+
+        logger.info(
+            "合成片段完成: %s... (G2P: %.2fs, 模型推理: %.2fs, 总计: %.2fs, tokens=%d)",
+            text[:16].strip(),
+            t_g2p,
+            t_infer,
+            t_g2p + t_infer,
+            token_len,
         )
 
         return result
@@ -773,14 +793,15 @@ def main(
     logger.info("正在加载并编译模型: %s (设备: %s)", resolved_model_file, device)
 
     model = core.read_model(str(resolved_model_file))
+    ov_config = {"PERFORMANCE_HINT": "LATENCY"}
     try:
-        compiled_model = core.compile_model(model, device)
-        logger.info("模型编译成功 (设备: %s)", device)
+        compiled_model = core.compile_model(model, device, config=ov_config)
+        logger.info("模型编译成功 (设备: %s, 模式: LATENCY)", device)
     except Exception as exc:
         if device.upper() != "CPU":
             logger.warning("在 '%s' 上编译模型失败: %s。自动回退到 'CPU' 设备...", device, exc)
             device = "CPU"
-            compiled_model = core.compile_model(model, "CPU")
+            compiled_model = core.compile_model(model, "CPU", config=ov_config)
             logger.info("模型在 'CPU' 设备上编译成功")
         else:
             raise
