@@ -4,20 +4,19 @@ Wyoming TTS 服务
 ================
 基于 OpenVINO 加速的 Kokoro 文字转语音服务，通过 Wyoming 协议对接 Home Assistant。
 
-多语言支持:
-    - 完整支持中文 (zh)、英语 (en)、日语 (ja)
-    - 额外扩展支持西班牙语 (es)、法语 (fr)、印地语 (hi)、意大利语 (it)、巴西葡萄牙语 (pt)
-    - 支持智能语言推断：优先按请求语言/声音前缀推断，亦可按文本字符（平假名/汉字/拉丁字母）自动匹配 G2P
-    - 自动扫描声音字典（voices.npy），向 Home Assistant 宣告所有中/英/日可用声音及对应语种
-    - 支持 Intel GPU / CPU / 混合推理 (AUTO / MULTI)
+多语言与音色机制:
+    - 语言优先采用 Wyoming 协议在请求中指定的语言（如 HA 配置的 voice.language）
+    - 若协议未指定语言，自动依据请求的发音人名称前缀推断（如 zf_* -> zh, jf_* -> ja, af_* -> en）
+    - 若仍未指定，根据待合成的文本内容自动推测（日文假名 -> ja, 汉字 -> zh, 字母 -> en）
+    - 命令行 --language 默认为 auto，完全可不传
+    - 启动时自动扫描并注册 voices.npy 中的全部发音人和语种供 Home Assistant 界面自由选择
 
 使用示例:
+    # 默认无需传 --language 和 --voice-name，全部由 HA 或自动策略控制
     python wyoming-tts.py \\
-        --model-path ./kokoro.xml \\
+        --model-path ./kokoro.onnx \\
         --voices-path ./voices.npy \\
-        --voice-name af_heart \\
-        --device GPU \\
-        --language zh
+        --device GPU
 """
 
 import asyncio
@@ -61,8 +60,7 @@ _LETTERS_IPA = (
 _SYMBOLS = [_PAD] + list(_PUNCTUATION) + list(_LETTERS) + list(_LETTERS_IPA)
 VOCAB: Dict[str, int] = {s: i for i, s in enumerate(_SYMBOLS)}
 
-# Kokoro 声音名称前缀与语言的映射关系
-# 例: af_heart -> en, zf_xiaobei -> zh, jf_teio -> ja
+# Kokoro 声音名称前缀与语言代码的对应
 VOICE_PREFIX_TO_LANG: Dict[str, str] = {
     "a": "en",  # American English
     "b": "en",  # British English
@@ -73,7 +71,7 @@ VOICE_PREFIX_TO_LANG: Dict[str, str] = {
     "h": "hi",  # Hindi
     "i": "it",  # Italian
     "p": "pt",  # Portuguese
-    "k": "ko",  # Korean (若安装对应库)
+    "k": "ko",  # Korean
 }
 
 
@@ -83,16 +81,18 @@ VOICE_PREFIX_TO_LANG: Dict[str, str] = {
 class MultiLangG2P:
     """
     多语言 G2P 转换管理器。
-    按需延迟加载各语言的 G2P 转换器，支持在同一服务实例内同时服务中、英、日等多语言请求。
+    按需延迟加载各语言的 G2P 引擎，支持同一服务内同时处理中、英、日等语言文本。
     """
 
-    def __init__(self, default_language: str = "zh") -> None:
-        self.default_language = default_language.split("-")[0].lower()
+    def __init__(self, fallback_language: str = "zh") -> None:
+        self.fallback_language = fallback_language.split("-")[0].lower()
         self._g2p_instances: Dict[str, object] = {}
 
-    def get_g2p(self, language: str):
+    def get_g2p(self, language: Optional[str] = None):
         """获取指定语言的 G2P 实例（按需加载并缓存）。"""
-        lang = language.split("-")[0].lower()
+        lang = (language or self.fallback_language or "zh").split("-")[0].lower()
+        if lang == "auto":
+            lang = self.fallback_language or "zh"
 
         if lang in self._g2p_instances:
             return self._g2p_instances[lang]
@@ -102,85 +102,69 @@ class MultiLangG2P:
         return g2p
 
     def _create_g2p(self, lang: str):
-        """创建指定语言的 misaki G2P 引擎。"""
+        """创建对应语言的 misaki G2P 引擎。"""
         try:
             if lang == "zh":
                 from misaki.zh import G2P
-
                 logger.info("已加载中文 G2P 引擎 (misaki.zh)")
                 return G2P()
 
             elif lang == "en":
                 from misaki.en import G2P
-
                 logger.info("已加载英文 G2P 引擎 (misaki.en)")
                 return G2P(trf=False)
 
             elif lang == "ja":
                 from misaki.ja import G2P
-
                 logger.info("已加载日文 G2P 引擎 (misaki.ja)")
                 return G2P()
 
             elif lang == "es":
                 from misaki.es import G2P
-
                 return G2P()
 
             elif lang == "fr":
                 from misaki.fr import G2P
-
                 return G2P()
 
             elif lang == "hi":
                 from misaki.hi import G2P
-
                 return G2P()
 
             elif lang == "it":
                 from misaki.it import G2P
-
                 return G2P()
 
             elif lang == "pt":
                 from misaki.pt import G2P
-
                 return G2P()
 
             elif lang == "ko":
                 from misaki.ko import G2P
-
                 return G2P()
 
             else:
-                logger.warning("未找到专门的 '%s' G2P 引擎，回退到英文/默认 G2P", lang)
+                logger.warning("未找到专门的 '%s' G2P 引擎，回退到基础英文/通用 G2P", lang)
                 from misaki.en import G2P
-
                 return G2P(trf=False)
 
         except ImportError as exc:
             logger.error(
-                "加载 '%s' 的 G2P 引擎失败，请确保安装了相应依赖: %s",
+                "加载语言 '%s' 的 G2P 引擎失败，请确保安装了该语种依赖 (如 pypinyin/jieba/fugashi/unidic-lite): %s",
                 lang,
                 exc,
             )
-            # 如果加载失败，尝试回退到英文规则转换
-            try:
-                from misaki.en import G2P
-
-                logger.warning("由于模块缺失，回退到 misaki.en 基础 G2P")
-                return G2P(trf=False)
-            except Exception:
-                raise ImportError(
-                    f"无法初始化 misaki G2P 引擎，请确认已安装 misaki: pip install misaki"
-                ) from exc
+            from misaki.en import G2P
+            logger.warning("回退到 misaki.en 基础 G2P")
+            return G2P(trf=False)
 
     def detect_language_from_text(self, text: str) -> str:
         """
-        根据文本特征自动检测语言:
+        根据待合成文本内容自动识别语言:
             - 包含日文平假名/片假名 → 日语 (ja)
             - 包含中文字符且无假名 → 中文 (zh)
-            - 其它（主要为拉丁字母） → 英语 (en)
+            - 纯拉丁字母/英文 → 英语 (en)
+            - 无法判定（如数字或标点） → 回退到兜底语言
         """
         # 日文平假名/片假名范围
         if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text):
@@ -190,20 +174,16 @@ class MultiLangG2P:
         if re.search(r"[\u4E00-\u9FFF]", text):
             return "zh"
 
-        # 默认推断为英文或默认语言
-        return self.default_language or "en"
+        # 包含英文字母
+        if re.search(r"[a-zA-Z]", text):
+            return "en"
+
+        return self.fallback_language or "zh"
 
 
 def process_text_with_misaki(g2p, text: str) -> np.ndarray:
     """
     使用 misaki 将文本转换为 Kokoro 模型所需的 token ID 序列。
-
-    参数:
-        g2p:  misaki G2P 转换器实例
-        text: 待合成文本
-
-    返回:
-        numpy int64 数组，shape 为 [1, seq_len]
     """
     phoneme_parts: List[str] = []
 
@@ -217,7 +197,7 @@ def process_text_with_misaki(g2p, text: str) -> np.ndarray:
         logger.warning("文本 '%s' 未能提取出有效音素", text)
         return np.array([[0, 0]], dtype=np.int64)
 
-    # 逐字符查表转换为 token ID，未知字符映射为 0 (PAD)
+    # 逐字符查表转换为 token ID
     token_ids = [0] + [VOCAB.get(c, 0) for c in phoneme_str] + [0]
     return np.array([token_ids], dtype=np.int64)
 
@@ -228,10 +208,6 @@ def process_text_with_misaki(g2p, text: str) -> np.ndarray:
 class TTSEventHandler(AsyncEventHandler):
     """
     Wyoming TTS 事件处理器。
-
-    处理来自 Wyoming 客户端的语音合成请求:
-        1. 收到 Describe 事件   → 返回所有注册的声音和语言
-        2. 收到 Synthesize 事件 → 动态匹配语言与声音，执行推理并流式返回音频
     """
 
     def __init__(
@@ -247,9 +223,6 @@ class TTSEventHandler(AsyncEventHandler):
         sample_rate: int,
         **kwargs,
     ) -> None:
-        """
-        初始化 TTS 事件处理器。
-        """
         super().__init__(*args, **kwargs)
         self.wyoming_info = wyoming_info
         self.compiled_model = compiled_model
@@ -280,27 +253,27 @@ class TTSEventHandler(AsyncEventHandler):
                 await self.write_event(AudioStop().event())
                 return True
 
-            # 确定本次请求的声音
+            # 1. 确定声音：优先使用 Wyoming 协议指定的 voice
             voice_name = self.default_voice_name
             if synth.voice and synth.voice.name and synth.voice.name in self.voices:
                 voice_name = synth.voice.name
 
-            # 确定本次请求的语言（多语言智能路由）
-            # 1. 优先使用请求显式指定的语言
+            # 2. 确定语言：
+            # 策略一：优先读取协议显式指定的语言
             lang = None
             if synth.voice and synth.voice.language:
                 lang = synth.voice.language.split("-")[0].lower()
 
-            # 2. 其次根据声音名称的前缀判断（例如 zf_* 为中文，af_* 为英文，jf_* 为日文）
+            # 策略二：若未指定，依据选定的声音名称前缀推导语言
             if not lang and voice_name:
                 prefix = voice_name[0].lower()
                 lang = VOICE_PREFIX_TO_LANG.get(prefix)
 
-            # 3. 再次根据文本字符内容自动侦测（平假名/片假名->ja, 汉字->zh, 其它->en）
-            if not lang:
+            # 策略三：若仍未确定（或设为 auto），依据合成文本内容自动检测（假名->ja, 汉字->zh, 字母->en）
+            if not lang or lang == "auto":
                 lang = self.g2p_manager.detect_language_from_text(text)
 
-            logger.info("合成请求: 语言=%s, 声音=%s, 文本=%s", lang, voice_name, text)
+            logger.info("TTS 合成: 语言=%s, 声音=%s, 文本=%s", lang, voice_name, text)
 
             # 发送音频流开始事件
             await self.write_event(
@@ -343,22 +316,8 @@ class TTSEventHandler(AsyncEventHandler):
     ) -> bytes:
         """
         使用 OpenVINO Kokoro 模型进行多语言语音合成。
-
-        处理流程:
-            1. 取得对应语言的 G2P 引擎，将文本转换为 IPA token IDs
-            2. 获取声音风格向量
-            3. 在线程池中执行 OpenVINO 推理
-            4. 将 float32 音频输出转换为 16-bit PCM
-
-        参数:
-            text:       待合成文本
-            language:   合成语言（zh / en / ja 等）
-            voice_name: 声音名称
-
-        返回:
-            16-bit PCM 格式音频字节
         """
-        target_lang = language or self.default_language
+        target_lang = language or self.default_language or "zh"
         g2p = self.g2p_manager.get_g2p(target_lang)
 
         # 文本 → 音素 token IDs
@@ -368,9 +327,8 @@ class TTSEventHandler(AsyncEventHandler):
         v_name = voice_name or self.default_voice_name
         style = self.voices.get(v_name)
         if style is None:
-            # 回退到第一个可用声音
             first_key = next(iter(self.voices))
-            logger.warning("未找到声音 '%s'，回退至 '%s'", v_name, first_key)
+            logger.warning("未找到声音 '%s'，自动回退至 '%s'", v_name, first_key)
             style = self.voices[first_key]
 
         if style.ndim == 1:
@@ -396,9 +354,7 @@ class TTSEventHandler(AsyncEventHandler):
         style: np.ndarray,
         speed: np.ndarray,
     ) -> bytes:
-        """
-        执行 OpenVINO 模型推理（在线程池中调用）。
-        """
+        """执行 OpenVINO 模型推理。"""
         output = self.compiled_model(
             {"tokens": tokens, "style": style, "speed": speed}
         )
@@ -430,10 +386,10 @@ def main(
         "-v",
         help="声音风格文件路径（.npy，字典格式 {name: vector}）",
     ),
-    voice_name: str = typer.Option(
-        "af_heart",
+    voice_name: Optional[str] = typer.Option(
+        None,
         "--voice-name",
-        help="默认声音名称",
+        help="默认声音名称（不指定则自动选用声音文件中的第一个声音；HA 发起请求时优先遵循 HA 选定的声音）",
     ),
     host: str = typer.Option(
         "0.0.0.0",
@@ -452,11 +408,11 @@ def main(
         "-d",
         help="OpenVINO 推理设备（CPU / GPU / AUTO / MULTI:CPU,GPU）",
     ),
-    language: str = typer.Option(
-        "zh",
+    language: Optional[str] = typer.Option(
+        "auto",
         "--language",
         "-l",
-        help="默认合成语言代码（zh / en / ja / es / fr / hi / it / pt）",
+        help="默认合成语言（默认为 auto；优先遵循 Wyoming 协议指定，其次按声音前缀或文本内容自动推测）",
     ),
     speed: float = typer.Option(
         1.0,
@@ -480,7 +436,7 @@ def main(
         help="日志级别（DEBUG / INFO / WARNING / ERROR）",
     ),
 ) -> None:
-    """启动基于 OpenVINO 的 Wyoming TTS（文字转语音）服务，完整支持中/英/日等全球多语言。"""
+    """启动基于 OpenVINO 的 Wyoming TTS 服务，支持多语言自动推测与协议动态选择。"""
 
     # 初始化日志系统
     logging.basicConfig(
@@ -514,24 +470,23 @@ def main(
         raise typer.BadParameter("voices 文件内容必须为声音字典对象")
 
     all_voice_names = list(voices.keys())
-    logger.info("已加载 %d 个声音，列表: %s", len(all_voice_names), all_voice_names[:10])
+    logger.info("已加载 %d 个声音", len(all_voice_names))
 
-    # 若指定默认声音不在字典中，则自动选取首个声音
-    if voice_name not in voices:
-        logger.warning("指定默认声音 '%s' 不存在，自动使用 '%s'", voice_name, all_voice_names[0])
-        voice_name = all_voice_names[0]
+    # 确定默认声音名称
+    selected_voice = voice_name
+    if not selected_voice or selected_voice not in voices:
+        selected_voice = all_voice_names[0]
+        logger.info("未指定或未匹配到默认声音，自动选用首个声音: %s", selected_voice)
 
     # ---- 初始化多语言 G2P 管理器 ----
-    g2p_manager = MultiLangG2P(default_language=language)
-    # 预加载默认语言的 G2P 引擎
-    g2p_manager.get_g2p(language)
+    default_lang = language or "auto"
+    g2p_manager = MultiLangG2P(fallback_language="zh" if default_lang == "auto" else default_lang)
 
     # ---- 自动扫描所有声音并构建 Wyoming 服务信息 ----
-    # 为 Home Assistant 生成完整的多语言声音列表
     tts_voices: List[TtsVoice] = []
     for v in all_voice_names:
         prefix = v[0].lower() if v else ""
-        v_lang = VOICE_PREFIX_TO_LANG.get(prefix, language)
+        v_lang = VOICE_PREFIX_TO_LANG.get(prefix, "zh")
         tts_voices.append(
             TtsVoice(
                 name=v,
@@ -556,7 +511,7 @@ def main(
 
     # ---- 启动 Wyoming 异步服务 ----
     server = AsyncServer.from_uri(f"tcp://{host}:{port}")
-    logger.info("TTS 服务启动: %s:%d (共注册 %d 个声音)", host, port, len(tts_voices))
+    logger.info("TTS 服务启动: %s:%d (共注册 %d 个声音，支持自动语言识别与 HA 动态指定)", host, port, len(tts_voices))
 
     asyncio.run(
         server.run(
@@ -566,8 +521,8 @@ def main(
                 compiled_model=compiled_model,
                 g2p_manager=g2p_manager,
                 voices=voices,
-                default_voice_name=voice_name,
-                default_language=language,
+                default_voice_name=selected_voice,
+                default_language=default_lang,
                 speed=speed,
                 sample_rate=sample_rate,
             )

@@ -4,14 +4,17 @@ Wyoming 协议 + OpenVINO 推理引擎：在 Intel GPU/CPU 上运行语音识别
 
 ## 🌟 核心特性
 
-- **多语言全面支持**：
-  - **STT (Whisper)**：原生支持 **中文 (zh)**、**英语 (en)**、**日语 (ja)** 及 90+ 种多国语言，支持动态按请求切换语言与 `auto` 自动语言检测。
-  - **TTS (Kokoro)**：内置多语言 G2P 管理器，无缝支持 **中文 (zh)**、**英语 (en)**、**日语 (ja)**，并可扩展支持西班牙语 (es)、法语 (fr)、印地语 (hi)、意大利语 (it)、巴西葡萄牙语 (pt) 等。自动按请求音色与文本特征匹配音素转换。
+- **多语言全自动推测与协议动态指定**：
+  - **无需强制指定语言**：命令行 `--language` 默认为 `auto`（完全可以不传）。
+  - **优先遵循 Wyoming 协议**：当 Home Assistant 配置的助理管线（如中文助理、日文助理、英文助理）发起请求时，服务会自动提取协议中的语言进行针对性识别与合成。
+  - **自动兜底与检测**：
+    - **STT (Whisper)**：若协议未传语言，由 Whisper 神经网络原生自动检测输入的说话语言（支持中、英、日等 90+ 种语言）。
+    - **TTS (Kokoro)**：若协议未传语言，自动根据选用的声音前缀（如 `zf_` -> 中文、`jf_` -> 日文、`af_` -> 英文）或文本字符（平假名/片假名/汉字/拉丁字母）自动路由至最合适的 G2P 引擎。
 - **Intel 硬件加速**：
   - 充分利用 Intel 独立显卡（Arc 系列）、核显（iGPU）或 CPU。
   - 支持 `GPU`、`CPU`、`AUTO` 与 `MULTI:CPU,GPU` 混合推理。
 - **Home Assistant 深度集成**：
-  - 符合 Wyoming 标准协议，自动向 HA 宣告支持的完整语言列表与声音声库。
+  - 自动向 HA 宣告支持的完整语言列表与声音声库（中/英/日等）。
 
 ---
 
@@ -59,38 +62,27 @@ optimum-cli export openvino \
 ### 1. 启动 STT 语音识别服务
 
 ```bash
-# 默认中文（支持在请求中动态指定 en / ja，或设为 auto）
+# 最简启动：无需指定语言，完全由 HA 协议指定或由 Whisper 自动检测！
 python wyoming-stt.py \
     --model-dir ./models/whisper-large-v3-turbo-openvino \
     --device GPU \
-    --language zh \
     --port 10020
 ```
-
-- `--language` 可以设为 `zh`、`en`、`ja` 或 `auto`（自动检测说话语言）。
-- 当 Home Assistant 的不同语音助理（如日文助手或英文助手）发起请求时，服务会自动切换为对应的语言识别，无需重启。
 
 ### 2. 启动 TTS 语音合成服务
 
 ```bash
+# 最简启动：无需指定语言和声音，自动注册全部声音并由 HA 或文本内容自动识别！
 python wyoming-tts.py \
     --model-path ./models/kokoro.onnx \
     --voices-path ./models/voices.npy \
-    --voice-name zf_xiaobei \
     --device GPU \
-    --language zh \
     --port 10021
 ```
 
-- 服务会自动扫描 `voices.npy` 中的全部音色，并自动为每个音色匹配中/英/日等语种，向 Home Assistant 完整注册。
-- 服务内置智能语言推断：
-  1. 优先使用 Home Assistant 请求中指定的语言。
-  2. 若未显式指定，根据声音名称前缀推断（如 `zf_` -> 中文, `af_` -> 英文, `jf_` -> 日文）。
-  3. 亦可直接分析待合成文本的字符（包含平假名/片假名走日文 G2P，包含中文字走中文 G2P，英文字母走英文 G2P）。
-
 ---
 
-## ⚙️ 常用命令行参数对照
+## ⚙️ 命令行参数对照
 
 ### STT 参数 (`wyoming-stt.py`)
 
@@ -98,7 +90,7 @@ python wyoming-tts.py \
 |---|---|---|---|
 | `--model-dir` | `-m` | (必填) | Whisper 模型目录 |
 | `--device` | `-d` | `GPU` | 推理设备 (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
-| `--language` | `-l` | `zh` | 默认识别语言代码 (`zh`, `en`, `ja`, `auto` 等) |
+| `--language` | `-l` | `auto` | 默认语言（优先遵循 Wyoming 协议请求；若协议未指定则自动检测） |
 | `--port` | `-p` | `10020` | 服务监听端口 |
 | `--host` | | `0.0.0.0` | 监听地址 |
 
@@ -108,9 +100,9 @@ python wyoming-tts.py \
 |---|---|---|---|
 | `--model-path` | `-m` | (必填) | Kokoro 模型文件路径 (.onnx 或 .xml) |
 | `--voices-path` | `-v` | (必填) | 声音文件路径 (.npy) |
-| `--voice-name` | | `af_heart` | 默认声音名称 |
+| `--voice-name` | | `None` (自动取首个声音) | 默认声音名称（HA 请求中指定的声音具有更高优先级） |
 | `--device` | `-d` | `GPU` | 推理设备 (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
-| `--language` | `-l` | `zh` | 默认语言 (`zh`, `en`, `ja`, `es`, `fr`, `hi`, `it`, `pt`) |
+| `--language` | `-l` | `auto` | 默认语言（优先遵循 HA 协议，其次按声音前缀/文本内容自动识别） |
 | `--speed` | `-s` | `1.0` | 语速倍率 |
 | `--port` | `-p` | `10021` | 服务监听端口 |
 
