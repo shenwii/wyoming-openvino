@@ -571,7 +571,15 @@ class TTSEventHandler(AsyncEventHandler):
             if not lang or lang == "auto":
                 lang = self.g2p_manager.detect_language_from_text(text)
 
-            logger.info("TTS 合成: 语言=%s, 声音=%s, 文本=%s", lang, voice_name, text)
+            # 3. 确定语速：优先使用 Wyoming 事件中传递的 speed，否则使用全局默认配置
+            req_speed = self.speed
+            if event.data:
+                if "speed" in event.data and isinstance(event.data["speed"], (int, float)):
+                    req_speed = float(event.data["speed"])
+                elif isinstance(event.data.get("voice"), dict) and "speed" in event.data["voice"]:
+                    req_speed = float(event.data["voice"]["speed"])
+
+            logger.info("TTS 合成: 语言=%s, 声音=%s, 语速=%.2f, 文本=%s", lang, voice_name, req_speed, text)
 
             # 发送音频流开始事件
             await self.write_event(
@@ -582,7 +590,7 @@ class TTSEventHandler(AsyncEventHandler):
                 ).event()
             )
 
-            # 3. 智能分句流式合成与分块发送:
+            # 4. 智能分句流式合成与分块发送:
             # 保证长文本不会超出模型 512 上下文，并且首句生成完毕立刻出声，极大缩短等待时间！
             chunks = split_text_into_chunks(text)
             logger.debug("文本分句完成 (%d 句): %s", len(chunks), chunks)
@@ -593,6 +601,7 @@ class TTSEventHandler(AsyncEventHandler):
                     text=chunk_text,
                     language=lang,
                     voice_name=voice_name,
+                    speed=req_speed,
                 )
                 if not chunk_audio:
                     continue
@@ -617,6 +626,7 @@ class TTSEventHandler(AsyncEventHandler):
         text: str,
         language: Optional[str] = None,
         voice_name: Optional[str] = None,
+        speed: Optional[float] = None,
     ) -> bytes:
         """
         使用 OpenVINO Kokoro 模型进行多语言语音合成。
@@ -655,7 +665,8 @@ class TTSEventHandler(AsyncEventHandler):
             style = style.reshape(1, 256)
         style = style.astype(np.float32)
 
-        speed_array = np.array([self.speed], dtype=np.float32)
+        target_speed = speed if speed is not None else self.speed
+        speed_array = np.array([target_speed], dtype=np.float32)
 
         # 在线程池中执行推理
         t_infer_start = time.perf_counter()
@@ -769,7 +780,7 @@ def main(
         1.0,
         "--speed",
         "-s",
-        help="语速倍率（1.0 为正常速度，>1.0 加速，<1.0 减速）",
+        help="语速倍率（默认 1.0；推荐设为 0.8~0.85 获得更从容自然的中文/日文听感，>1.0 加速，<1.0 减速）",
     ),
     sample_rate: int = typer.Option(
         24000,

@@ -97,9 +97,14 @@ python wyoming-stt.py \
 ```bash
 python wyoming-tts.py \
     --model-dir /path/to/Kokoro-82M-FP16-OpenVINO \
-    --device GPU \
+    --device CPU \
+    --speed 0.85 \
     --port 10021
 ```
+
+> [!TIP]
+> **语速推荐**：Kokoro 默认语速 `1.0` 在朗读中文/日文时稍偏快。启动时添加 `--speed 0.85`（或 `0.8`）能够获得最自然悠扬、清晰自然的播报体验！
+> **设备推荐**：由于 Kokoro 模型中算子的特性，TTS 推荐使用 `CPU` 设备，具有最佳兼容性与极佳的吞吐表现。
 
 ---
 
@@ -120,9 +125,9 @@ python wyoming-tts.py \
 | 参数 | 简写 | 默认值 | 说明 |
 |---|---|---|---|
 | `--model-dir` | `-m` | (必填) | Kokoro 模型目录（自动加载 xml/bin 和 voices 目录） |
-| `--device` | `-d` | `GPU` | 推理设备 (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
+| `--device` | `-d` | `CPU` | 推理设备 (`CPU` 推荐 / `GPU` / `AUTO`) |
 | `--language` | `-l` | `auto` | 默认语言（优先遵循 HA 协议，其次按音色/文本自动识别） |
-| `--speed` | `-s` | `1.0` | 语速倍率 |
+| `--speed` | `-s` | `1.0` | 语速倍率（推荐 `0.85` 或 `0.8`；>1.0 加速，<1.0 减速） |
 | `--port` | `-p` | `10021` | 服务监听端口 |
 
 ---

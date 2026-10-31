@@ -96,9 +96,14 @@ python wyoming-stt.py \
 ```bash
 python wyoming-tts.py \
     --model-dir /path/to/Kokoro-82M-FP16-OpenVINO \
-    --device GPU \
+    --device CPU \
+    --speed 0.85 \
     --port 10021
 ```
+
+> [!TIP]
+> **Speed Recommendation**: The default `1.0` speed can sound slightly hurried for Chinese and Japanese. Setting `--speed 0.85` (or `0.8`) delivers a significantly more natural and relaxed pacing.
+> **Device Recommendation**: `CPU` is recommended for Kokoro-82M-FP16 due to IR operator compatibility and fast response latency.
 
 ---
 
@@ -119,9 +124,9 @@ python wyoming-tts.py \
 | Option | Flag | Default | Description |
 |---|---|---|---|
 | `--model-dir` | `-m` | (Required) | Kokoro model directory (automatically locates xml/bin and voices/) |
-| `--device` | `-d` | `GPU` | Inference target (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
+| `--device` | `-d` | `CPU` | Inference target (`CPU` recommended / `GPU` / `AUTO`) |
 | `--language` | `-l` | `auto` | Default language (prioritizes HA Wyoming request, or infers from text/voice) |
-| `--speed` | `-s` | `1.0` | Speech speed multiplier |
+| `--speed` | `-s` | `1.0` | Speech speed multiplier (recommended `0.85` or `0.8` for natural pacing) |
 | `--port` | `-p` | `10021` | Server listening port |
 
 ---

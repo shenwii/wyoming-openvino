@@ -96,9 +96,14 @@ python wyoming-stt.py \
 ```bash
 python wyoming-tts.py \
     --model-dir /path/to/Kokoro-82M-FP16-OpenVINO \
-    --device GPU \
+    --device CPU \
+    --speed 0.85 \
     --port 10021
 ```
+
+> [!TIP]
+> **推奨発話速度**：Kokoro のデフォルト速度 `1.0` は日本語や中国語では少し早口に聞こえる傾向があります。起動時に `--speed 0.85`（または `0.8`）を指定すると、非常に自然で落ち着いた聞き取りやすい発話になります。
+> **推奨推論デバイス**：Kokoro-82M-FP16 はモデル内演算子の互換性および高速な応答性を確保するため、`CPU` デバイスでの実行を推奨します。
 
 ---
 
@@ -119,9 +124,9 @@ python wyoming-tts.py \
 | 引数 | 短縮 | デフォルト | 説明 |
 |---|---|---|---|
 | `--model-dir` | `-m` | (必須) | Kokoro モデルディレクトリ（xml/bin および voices を自動検索） |
-| `--device` | `-d` | `GPU` | 推論デバイス (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
+| `--device` | `-d` | `CPU` | 推論デバイス (`CPU` 推奨 / `GPU` / `AUTO`) |
 | `--language` | `-l` | `auto` | デフォルト言語（HA のリクエスト優先、未指定時は自動推測） |
-| `--speed` | `-s` | `1.0` | 発話速度倍率 |
+| `--speed` | `-s` | `1.0` | 発話速度倍率（自然な速度には `0.85` または `0.8` を推奨） |
 | `--port` | `-p` | `10021` | リッスンポート番号 |
 
 ---
