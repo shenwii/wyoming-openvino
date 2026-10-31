@@ -21,8 +21,10 @@ Wyoming TTS 服务
 """
 
 import asyncio
+import io
 import logging
 import re
+import wave
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -533,20 +535,22 @@ class TTSEventHandler(AsyncEventHandler):
             voice_data = self.voices[first_key]
 
         # 提取当前 token 长度适配的 style 向量
-        # Kokoro 的 voice embedding 文件通常包含按序列长度索引的向量
         token_len = tokens.shape[1]
         if voice_data.ndim == 2:
-            # shape: (N, 256)
             idx = min(token_len, len(voice_data) - 1)
-            style = voice_data[idx : idx + 1]  # shape: (1, 256)
+            style = voice_data[idx : idx + 1]
         elif voice_data.ndim == 3:
-            # shape: (N, 1, 256)
             idx = min(token_len, len(voice_data) - 1)
-            style = voice_data[idx]            # shape: (1, 256)
+            style = voice_data[idx]
         elif voice_data.ndim == 1:
-            style = voice_data[np.newaxis, :]  # shape: (1, 256)
+            style = voice_data[np.newaxis, :]
         else:
             style = voice_data
+
+        # 确保 style 为 float32 且 shape 规范为 (1, 256)
+        if style.shape != (1, 256):
+            style = style.reshape(1, 256)
+        style = style.astype(np.float32)
 
         speed_array = np.array([self.speed], dtype=np.float32)
 
@@ -569,24 +573,23 @@ class TTSEventHandler(AsyncEventHandler):
         speed: np.ndarray,
     ) -> bytes:
         """执行 OpenVINO 模型推理。"""
-        # 自适应匹配模型输入端口
-        inputs = {}
-        for inp in self.compiled_model.inputs:
-            name = inp.get_any_name().lower()
-            if "token" in name or "input" in name or "id" in name:
-                inputs[inp] = tokens
-            elif "style" in name or "ref" in name:
-                inputs[inp] = style
-            elif "speed" in name:
-                inputs[inp] = speed
-            else:
-                inputs[inp] = tokens
-
-        # 若端口未匹配到任何名称，采用常规字典回退
-        if not inputs:
-            inputs = {"tokens": tokens, "style": style, "speed": speed}
-
-        output = self.compiled_model(inputs)
+        # Kokoro OpenVINO 官方 IR 模型接受固定顺序的列表输入: [input_ids, ref_s, speed]
+        try:
+            output = self.compiled_model([tokens, style, speed])
+        except Exception as e:
+            logger.debug("顺序列表传参未直接命中，尝试命名端口传参: %s", e)
+            inputs = {}
+            for inp in self.compiled_model.inputs:
+                name = inp.get_any_name().lower()
+                if "token" in name or "input" in name or "id" in name:
+                    inputs[inp] = tokens
+                elif "style" in name or "ref" in name:
+                    inputs[inp] = style
+                elif "speed" in name:
+                    inputs[inp] = speed
+                else:
+                    inputs[inp] = tokens
+            output = self.compiled_model(inputs)
 
         audio = output[self.compiled_model.output(0)]
         audio = np.squeeze(audio)
@@ -637,10 +640,10 @@ def main(
         help="服务监听端口",
     ),
     device: str = typer.Option(
-        "GPU",
+        "CPU",
         "--device",
         "-d",
-        help="OpenVINO 推理设备（CPU / GPU / AUTO / MULTI:CPU,GPU）",
+        help="OpenVINO 推理设备（默认 CPU，Kokoro 模型在 CPU 上极快且兼容性最佳）",
     ),
     language: Optional[str] = typer.Option(
         "auto",
@@ -701,8 +704,17 @@ def main(
     logger.info("正在加载并编译模型: %s (设备: %s)", resolved_model_file, device)
 
     model = core.read_model(str(resolved_model_file))
-    compiled_model = core.compile_model(model, device)
-    logger.info("模型编译完毕")
+    try:
+        compiled_model = core.compile_model(model, device)
+        logger.info("模型编译成功 (设备: %s)", device)
+    except Exception as exc:
+        if device.upper() != "CPU":
+            logger.warning("在 '%s' 上编译模型失败: %s。自动回退到 'CPU' 设备...", device, exc)
+            device = "CPU"
+            compiled_model = core.compile_model(model, "CPU")
+            logger.info("模型在 'CPU' 设备上编译成功")
+        else:
+            raise
 
     # ---- 初始化多语言 G2P 管理器 ----
     default_lang = language or "auto"
