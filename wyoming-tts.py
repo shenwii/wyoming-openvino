@@ -107,43 +107,63 @@ class MultiLangG2P:
         """创建对应语言的 misaki G2P 引擎。"""
         try:
             if lang == "zh":
-                from misaki.zh import G2P
-                logger.info("已加载中文 G2P 引擎 (misaki.zh)")
-                return G2P()
+                from misaki import zh
+                cls = getattr(zh, "ZHG2P", None) or getattr(zh, "G2P", None)
+                if cls is None:
+                    raise ImportError("无法在 misaki.zh 中找到 ZHG2P 类")
+                logger.info("已加载中文 G2P 引擎 (misaki.zh.%s)", cls.__name__)
+                # 尝试关联英文 G2P 以支持中英混合发音
+                try:
+                    en_g2p = self.get_g2p("en")
+                    return cls(en_callable=en_g2p)
+                except Exception:
+                    return cls()
 
             elif lang == "en":
-                from misaki.en import G2P
-                logger.info("已加载英文 G2P 引擎 (misaki.en)")
-                return G2P(trf=False)
+                from misaki import en
+                cls = getattr(en, "G2P", None) or getattr(en, "ENG2P", None)
+                if cls is None:
+                    raise ImportError("无法在 misaki.en 中找到 G2P 类")
+                logger.info("已加载英文 G2P 引擎 (misaki.en.%s)", cls.__name__)
+                return cls(trf=False)
 
             elif lang == "ja":
-                from misaki.ja import G2P
-                logger.info("已加载日文 G2P 引擎 (misaki.ja)")
-                return G2P()
+                from misaki import ja
+                cls = getattr(ja, "JAG2P", None) or getattr(ja, "G2P", None)
+                if cls is None:
+                    raise ImportError("无法在 misaki.ja 中找到 JAG2P 类")
+                logger.info("已加载日文 G2P 引擎 (misaki.ja.%s)", cls.__name__)
+                return cls()
 
             elif lang == "es":
-                from misaki.es import G2P
-                return G2P()
+                from misaki import es
+                cls = getattr(es, "ESG2P", None) or getattr(es, "G2P", None)
+                return cls()
 
             elif lang == "fr":
-                from misaki.fr import G2P
-                return G2P()
+                from misaki import fr
+                cls = getattr(fr, "FRG2P", None) or getattr(fr, "G2P", None)
+                return cls()
 
             elif lang == "hi":
-                from misaki.hi import G2P
-                return G2P()
+                from misaki import hi
+                cls = getattr(hi, "HIG2P", None) or getattr(hi, "G2P", None)
+                return cls()
 
             elif lang == "it":
-                from misaki.it import G2P
-                return G2P()
+                from misaki import it
+                cls = getattr(it, "ITG2P", None) or getattr(it, "G2P", None)
+                return cls()
 
             elif lang == "pt":
-                from misaki.pt import G2P
-                return G2P()
+                from misaki import pt
+                cls = getattr(pt, "PTG2P", None) or getattr(pt, "G2P", None)
+                return cls()
 
             elif lang == "ko":
-                from misaki.ko import G2P
-                return G2P()
+                from misaki import ko
+                cls = getattr(ko, "KOG2P", None) or getattr(ko, "G2P", None)
+                return cls()
 
             else:
                 logger.warning("未找到专门的 '%s' G2P 引擎，回退到基础英文/通用 G2P", lang)
@@ -158,7 +178,7 @@ class MultiLangG2P:
             }.get(lang, f"pip install 'misaki[{lang}]'")
 
             err_msg = (
-                f"加载语言 '{lang}' 的 G2P 引擎失败，缺少必要依赖 ({exc.name})。\n"
+                f"加载语言 '{lang}' 的 G2P 引擎失败，缺少必要依赖 ({exc})。\n"
                 f"请在当前虚拟环境中执行命令安装: {install_hint}"
             )
             logger.error(err_msg)
