@@ -1,36 +1,10 @@
 # ===========================================================================
-# Wyoming OpenVINO - 依赖清单
+# Wyoming OpenVINO - 全量依赖清单 (STT + TTS)
 # ===========================================================================
-# 本项目将 OpenVINO 加速的 STT/TTS 模型通过 Wyoming 协议对接 Home Assistant，
-# 支持在 Intel GPU/CPU 上高效运行 Whisper 和 Kokoro，全面支持中/英/日多语言。
+# 若只需运行单独服务，请使用专门的依赖文件:
+#   - STT 服务: pip install -r requirements-stt.txt
+#   - TTS 服务: pip install -r requirements-tts.txt
 # ===========================================================================
 
-# Wyoming 协议核心库（与 Home Assistant 语音助手通信）
-wyoming>=1.5.0
-
-# Intel OpenVINO 核心推理引擎（TTS 模型推理）
-openvino>=2024.0
-
-# OpenVINO GenAI 推理管线（Whisper STT 语音识别）
-openvino-genai>=2024.0
-
-# Kokoro TTS 文本前端（文本 → IPA 音素转换）
-misaki>=0.4.0
-
-# PyTorch（用于加载 Kokoro 官方发布的 .pt 声音文件）
-torch
-
-# ---- 多语言 G2P 支持依赖 ----
-# 中文支持 (拼音与分词)
-pypinyin
-jieba
-
-# 日文支持 (形态素解析与词典)
-fugashi
-unidic-lite
-
-# 数值计算
-numpy>=1.24.0
-
-# 命令行参数解析
-typer>=0.9.0
+-r requirements-stt.txt
+-r requirements-tts.txt

@@ -26,11 +26,19 @@ Wyoming 协议 + OpenVINO 推理引擎：在 Intel GPU/CPU 上运行语音识别
 - Intel GPU 驱动与 OpenVINO Runtime
 
 ### 2. 安装依赖
+
+根据你的使用场景，选择安装对应的依赖：
+
 ```bash
+# 场景 A: 仅运行 STT (语音识别) 服务（极简轻量，仅需 OpenVINO GenAI 与 Wyoming）
+pip install -r requirements-stt.txt
+
+# 场景 B: 仅运行 TTS (语音合成) 服务（含 Kokoro 与中/英/日多语言分词依赖）
+pip install -r requirements-tts.txt
+
+# 场景 C: 同时运行 STT 和 TTS
 pip install -r requirements.txt
 ```
-> [!TIP]
-> `requirements.txt` 中已包含中文（`pypinyin`, `jieba`）与日文（`fugashi`, `unidic-lite`）所需的 G2P 解析依赖。
 
 ---
 

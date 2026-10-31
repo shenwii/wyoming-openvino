@@ -151,14 +151,18 @@ class MultiLangG2P:
                 return G2P(trf=False)
 
         except ImportError as exc:
-            logger.error(
-                "加载语言 '%s' 的 G2P 引擎失败，请确保安装了该语种依赖 (如 pypinyin/jieba/fugashi/unidic-lite): %s",
-                lang,
-                exc,
+            install_hint = {
+                "zh": "pip install ordered-set pypinyin pypinyin-dict jieba cn2an",
+                "en": "pip install num2words",
+                "ja": "pip install fugashi unidic-lite jaconv mojimoji",
+            }.get(lang, f"pip install 'misaki[{lang}]'")
+
+            err_msg = (
+                f"加载语言 '{lang}' 的 G2P 引擎失败，缺少必要依赖 ({exc.name})。\n"
+                f"请在当前虚拟环境中执行命令安装: {install_hint}"
             )
-            from misaki.en import G2P
-            logger.warning("回退到 misaki.en 基础 G2P")
-            return G2P(trf=False)
+            logger.error(err_msg)
+            raise RuntimeError(err_msg) from exc
 
     def detect_language_from_text(self, text: str) -> str:
         """
