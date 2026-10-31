@@ -17,6 +17,9 @@ openvino-genai>=2024.0
 # Kokoro TTS 文本前端（文本 → IPA 音素转换）
 misaki>=0.4.0
 
+# PyTorch（用于加载 Kokoro 官方发布的 .pt 声音文件）
+torch
+
 # ---- 多语言 G2P 支持依赖 ----
 # 中文支持 (拼音与分词)
 pypinyin

@@ -201,6 +201,64 @@ def process_text_with_misaki(g2p, text: str) -> np.ndarray:
 # ===========================================================================
 # 模型与声音资源自动解析工具
 # ===========================================================================
+def load_voice_file(file_path: Path) -> np.ndarray:
+    """加载单个声音文件（支持 .pt, .pth, .bin, .npy），返回 numpy 数组。"""
+    suffix = file_path.suffix.lower()
+
+    if suffix in [".pt", ".pth"]:
+        # 1. 优先使用 torch 加载
+        try:
+            import torch
+            try:
+                data = torch.load(file_path, weights_only=True, map_location="cpu")
+            except Exception:
+                data = torch.load(file_path, weights_only=False, map_location="cpu")
+
+            if hasattr(data, "detach"):
+                arr = data.detach().cpu().numpy()
+            elif isinstance(data, dict):
+                first_val = next(iter(data.values()))
+                arr = first_val.detach().cpu().numpy() if hasattr(first_val, "detach") else np.array(first_val)
+            else:
+                arr = np.array(data)
+
+            if arr.ndim == 1 and arr.size % 256 == 0:
+                arr = arr.reshape(-1, 256)
+            return arr
+        except ImportError:
+            # 2. 若未安装 torch，尝试直接解析 PyTorch 的 zip 归档格式提取二进制 float32 权重
+            import zipfile
+            try:
+                with zipfile.ZipFile(file_path, "r") as z:
+                    for member in z.namelist():
+                        if member.endswith("/0") or member.startswith("archive/data/"):
+                            with z.open(member) as f:
+                                raw = f.read()
+                                arr = np.frombuffer(raw, dtype=np.float32)
+                                if arr.size % 256 == 0:
+                                    return arr.reshape(-1, 256)
+                                return arr
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"加载 {file_path.name} 失败：请安装 PyTorch (pip install torch) 以解析 .pt 声音文件"
+            )
+
+    elif suffix == ".bin":
+        arr = np.fromfile(file_path, dtype=np.float32)
+        if arr.size % 256 == 0:
+            arr = arr.reshape(-1, 256)
+        return arr
+
+    elif suffix in [".npy", ".npz"]:
+        arr = np.load(file_path, allow_pickle=True)
+        if arr.ndim == 1 and arr.size % 256 == 0:
+            arr = arr.reshape(-1, 256)
+        return arr
+
+    raise ValueError(f"不支持的声音文件格式: {suffix}")
+
+
 def resolve_model_and_voices(
     model_dir: Optional[str] = None,
     model_path: Optional[str] = None,
@@ -209,10 +267,10 @@ def resolve_model_and_voices(
     """
     自动查找并解析 Kokoro 模型与发音人声音数据。
 
-    支持两种形式:
+    支持多种形式:
       1. 官方 OpenVINO 目录:
-         包含 openvino_model.xml, openvino_model.bin 以及 voices/*.bin
-      2. 单文件形式:
+         包含 openvino_model.xml, openvino_model.bin 以及 voices/*.pt 或 voices/*.bin
+      2. 单文件/目录形式:
          --model-path 指定 .xml 或 .onnx，--voices-path 指定 voices 目录或 .npy 文件
     """
     # 1. 确定模型路径
@@ -221,7 +279,6 @@ def resolve_model_and_voices(
     if model_path:
         p = Path(model_path)
         if p.is_dir():
-            # 用户传的是目录
             candidates = [p / "openvino_model.xml", p / "model.xml"] + list(p.glob("*.xml")) + list(p.glob("*.onnx"))
             for cand in candidates:
                 if cand.exists():
@@ -264,26 +321,28 @@ def resolve_model_and_voices(
         if not src.exists():
             continue
 
-        # 场景 A: voices 目录（包含众多 *.bin 单个音色文件，如官方 OpenVINO 仓库）
+        logger.info("检查声音候选路径: %s", src)
+
+        # 场景 A: voices 目录（包含众多 *.pt, *.bin, *.npy 单个音色文件）
         if src.is_dir():
-            bin_files = list(src.glob("*.bin"))
-            if bin_files:
-                logger.info("在目录 %s 中找到 %d 个 .bin 声音文件", src, len(bin_files))
-                for bf in bin_files:
-                    v_name = bf.stem  # 如 'af_heart'
+            voice_files = []
+            for ext in ["*.pt", "*.pth", "*.bin", "*.npy"]:
+                voice_files.extend(src.glob(ext))
+
+            if voice_files:
+                logger.info("在目录 %s 中找到 %d 个声音文件 (*.pt / *.bin 等)", src, len(voice_files))
+                for vf in voice_files:
+                    v_name = vf.stem  # 如 'af_heart'
                     try:
-                        # 官方 Kokoro .bin 文件为 float32 原始二进制向量
-                        # shape 典型为 (-1, 1, 256) 或 (-1, 256)
-                        data = np.fromfile(bf, dtype=np.float32)
-                        if data.size % 256 == 0:
-                            data = data.reshape(-1, 256)
+                        data = load_voice_file(vf)
                         voices[v_name] = data
                     except Exception as err:
-                        logger.warning("加载声音文件 %s 失败: %s", bf, err)
+                        logger.warning("加载声音文件 %s 失败: %s", vf, err)
                 if voices:
+                    logger.info("成功加载 %d 个发音人音色", len(voices))
                     break
 
-        # 场景 B: voices.npy / .npz 单个打包文件
+        # 场景 B: voices.npy / .npz / voices.bin 单个打包文件
         elif src.is_file() and (src.suffix in [".npy", ".npz"] or src.name == "voices.bin"):
             try:
                 voices_raw = np.load(src, allow_pickle=True)
@@ -301,8 +360,8 @@ def resolve_model_and_voices(
 
     if not voices:
         raise FileNotFoundError(
-            f"未找到可用的声音数据（未在 voices/ 目录下找到 *.bin 或 voices.npy 文件）。"
-            f"请检查声音目录或指定 --voices-path"
+            f"未在候选路径中找到可用的声音数据（支持 voices/ 目录下的 *.pt, *.bin 或 voices.npy 打包文件）。"
+            f"请检查路径: model_dir={model_dir}, voices_path={voices_path}"
         )
 
     return target_model_file, voices
