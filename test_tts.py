@@ -11,6 +11,7 @@ TTS 快速测试与 WAV 音频生成脚本
 """
 
 import io
+import re
 import wave
 from pathlib import Path
 from typing import Optional
@@ -92,7 +93,11 @@ def main(
 
     all_voices = list(voices.keys())
     if not voice_name or voice_name not in voices:
-        voice_name = all_voices[0]
+        preferred_voices = (
+            [v for v in all_voices if v.startswith("zf_") or v.startswith("zm_")] +
+            [v for v in all_voices if v.startswith("af_") or v.startswith("am_")]
+        )
+        voice_name = preferred_voices[0] if preferred_voices else all_voices[0]
 
     print(f"🎙️  使用声音: {voice_name}")
 
@@ -109,13 +114,14 @@ def main(
     # 3. 初始化 G2P 并转换音素
     g2p_manager = MultiLangG2P(fallback_language="zh" if language == "auto" else language)
 
-    # 自动识别语言
+    # 自动识别语言（若文本包含汉字，必须优先使用 zh）
     target_lang = language
     if not target_lang or target_lang == "auto":
         target_lang = g2p_manager.detect_language_from_text(text)
+    elif re.search(r"[\u4E00-\u9FFF]", text) and target_lang not in ("zh", "ja"):
+        target_lang = "zh"
 
     print(f"🌐 确定语言: {target_lang}")
-    g2p = g2p_manager.get_g2p(target_lang)
 
     # 4. 文本切句与分段推理
     _split_func = getattr(_mod, "split_text_into_chunks", lambda t: [t])
@@ -127,7 +133,14 @@ def main(
     speed_array = np.array([speed], dtype=np.float32)
 
     for i, chunk_text in enumerate(chunks, 1):
-        tokens = process_text_with_misaki(g2p, chunk_text, vocab=vocab)
+        chunk_lang = target_lang
+        if re.search(r"[\u4E00-\u9FFF]", chunk_text) and chunk_lang not in ("zh", "ja"):
+            chunk_lang = "zh"
+        elif re.search(r"[\u3040-\u309F\u30A0-\u30FF]", chunk_text) and chunk_lang != "ja":
+            chunk_lang = "ja"
+
+        chunk_g2p = g2p_manager.get_g2p(chunk_lang)
+        tokens = process_text_with_misaki(chunk_g2p, chunk_text, vocab=vocab)
         token_len = tokens.shape[1]
 
         if voice_data.ndim == 2:

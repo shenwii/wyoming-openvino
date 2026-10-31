@@ -116,8 +116,8 @@ class MultiLangG2P:
                     raise ImportError("无法在 misaki.zh 中找到 ZHG2P 类")
                 logger.info("已加载中文 G2P 引擎 (misaki.zh.%s)", cls.__name__)
 
-                # 优化英文单词回调：首尾确保空格隔离，避免音素与相邻汉字拼音粘连；带 LRU 高速缓存
-                @lru_cache(maxsize=512)
+                # 优化英文单词回调：无多余空格污染，带 LRU 高速缓存
+                @lru_cache(maxsize=1024)
                 def fast_en_callable(w: str) -> str:
                     w = w.strip()
                     if not w:
@@ -126,10 +126,9 @@ class MultiLangG2P:
                         en_engine = self.get_g2p("en")
                         res = en_engine(w)
                         phonemes = res[0] if isinstance(res, tuple) else str(res)
-                        # 在英文音标前后保留空格，确保与汉字声调拼音自然断开
-                        return f" {phonemes.strip()} "
+                        return phonemes.strip()
                     except Exception:
-                        return f" {w} "
+                        return w
 
                 # 优先采用官方推荐的 version="1.1"（对中英混排有完整优化）
                 try:
@@ -226,8 +225,8 @@ def normalize_mixed_text(text: str) -> str:
     2. 将常见的 2~4 位全大写缩写词（如 AI, CPU, GPU, TTS）展开为按字母读音（如 A I, C P U）。
     """
     # 中英文边界补空格
-    text = re.sub(r"([\u4e00-\u9fa5])([a-zA-Z])", r"\1 \2", text)
-    text = re.sub(r"([a-zA-Z])([\u4e00-\u9fa5])", r"\1 \2", text)
+    text = re.sub(r"([\u4e00-\u9fff])([a-zA-Z])", r"\1 \2", text)
+    text = re.sub(r"([a-zA-Z])([\u4e00-\u9fff])", r"\1 \2", text)
     # 大写缩写展开（如 AI -> A I）
     text = re.sub(r"\b([A-Z]{2,4})\b", lambda m: " ".join(list(m.group(1))), text)
     return text
@@ -300,7 +299,7 @@ def process_text_with_misaki(g2p, text: str, vocab: Optional[Dict[str, int]] = N
         logger.warning("文本 '%s' 未能提取出有效音素", text)
         return np.array([[0, 0]], dtype=np.int64)
 
-    logger.debug("音素转换结果: %s -> %s", text, phoneme_str)
+    logger.info("音素转换: '%s' -> '%s'", text, phoneme_str)
 
     # 使用从 config.json 解析出的精确词汇表；若无则回退到备用表
     active_vocab = vocab if vocab is not None else VOCAB
@@ -559,17 +558,26 @@ class TTSEventHandler(AsyncEventHandler):
             if synth.voice and synth.voice.name and synth.voice.name in self.voices:
                 voice_name = synth.voice.name
 
-            # 2. 确定语言：
-            lang = None
+            # 2. 智能确定目标合成语言：
+            # 核心策略（内容优先）：
+            # - 若文本包含中文汉字，必须使用 'zh'（中文 G2P 原生支持汉字与中英混排，而英文 G2P 会完全过滤丢失汉字）
+            # - 若文本包含日文假名，必须使用 'ja'
+            # - 若文本为纯西文字符/数字：优先遵循客户端请求语言、声音前缀或兜底配置
+            detected_lang = self.g2p_manager.detect_language_from_text(text)
+
+            client_lang = None
             if synth.voice and synth.voice.language:
-                lang = synth.voice.language.split("-")[0].lower()
+                client_lang = synth.voice.language.split("-")[0].lower()
 
-            if not lang and voice_name:
+            if detected_lang in ("zh", "ja"):
+                lang = detected_lang
+            elif client_lang and client_lang != "auto":
+                lang = client_lang
+            elif voice_name:
                 prefix = voice_name[0].lower()
-                lang = VOICE_PREFIX_TO_LANG.get(prefix)
-
-            if not lang or lang == "auto":
-                lang = self.g2p_manager.detect_language_from_text(text)
+                lang = VOICE_PREFIX_TO_LANG.get(prefix, detected_lang)
+            else:
+                lang = detected_lang
 
             # 3. 确定语速：优先使用 Wyoming 事件中传递的 speed，否则使用全局默认配置
             req_speed = self.speed
@@ -579,7 +587,7 @@ class TTSEventHandler(AsyncEventHandler):
                 elif isinstance(event.data.get("voice"), dict) and "speed" in event.data["voice"]:
                     req_speed = float(event.data["voice"]["speed"])
 
-            logger.info("TTS 合成: 语言=%s, 声音=%s, 语速=%.2f, 文本=%s", lang, voice_name, req_speed, text)
+            logger.info("TTS 合成: 语言=%s (检测=%s), 声音=%s, 语速=%.2f, 文本=%s", lang, detected_lang, voice_name, req_speed, text)
 
             # 发送音频流开始事件
             await self.write_event(
@@ -633,6 +641,13 @@ class TTSEventHandler(AsyncEventHandler):
         """
         t0 = time.perf_counter()
         target_lang = language or self.default_language or "zh"
+
+        # 保护性自适应：如果切片实际包含汉字，绝不能使用 en G2P，否则汉字会被完全丢弃！
+        if re.search(r"[\u4E00-\u9FFF]", text) and target_lang not in ("zh", "ja"):
+            target_lang = "zh"
+        elif re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text) and target_lang != "ja":
+            target_lang = "ja"
+
         g2p = self.g2p_manager.get_g2p(target_lang)
 
         # 文本 → 音素 token IDs（传入官方精准 vocab 字典）
@@ -819,7 +834,12 @@ def main(
     all_voice_names = list(voices.keys())
     selected_voice = voice_name
     if not selected_voice or selected_voice not in voices:
-        selected_voice = all_voice_names[0]
+        # 优先默认推选中文优质音色（zf_* / zm_*），其次英文音色（af_* / am_*），若无则取首个
+        preferred_voices = (
+            [v for v in all_voice_names if v.startswith("zf_") or v.startswith("zm_")] +
+            [v for v in all_voice_names if v.startswith("af_") or v.startswith("am_")]
+        )
+        selected_voice = preferred_voices[0] if preferred_voices else all_voice_names[0]
 
     logger.info("已加载 %d 个声音，默认声音: %s", len(all_voice_names), selected_voice)
 
