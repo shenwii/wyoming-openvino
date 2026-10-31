@@ -203,10 +203,44 @@ class MultiLangG2P:
         return self.fallback_language or "zh"
 
 
-def process_text_with_misaki(g2p, text: str) -> np.ndarray:
+def split_text_into_chunks(text: str, max_chunk_chars: int = 120) -> List[str]:
+    """
+    将长文本智能按中英文句号、分号、问号、感叹号、换行符切分为自然的语音分句。
+    确保单次进入模型的文本不会超出 Kokoro 的 512 token 上下文限制，
+    同时使首句音频可以在几百毫秒内即时输出，消除长时间卡顿。
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    # 优先按换行符和主要句子结束标点分割，保留标点符号
+    pattern = r"([^。！？\n!?;\r]+[。！？\n!?;]*)"
+    raw_sentences = re.findall(pattern, text)
+    if not raw_sentences:
+        raw_sentences = [text]
+
+    chunks = []
+    current_chunk = ""
+    for s in raw_sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(current_chunk) + len(s) > max_chunk_chars and current_chunk:
+            chunks.append(current_chunk)
+            current_chunk = s
+        else:
+            current_chunk += (" " if current_chunk and s and s[0].isalnum() else "") + s
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+def process_text_with_misaki(g2p, text: str, vocab: Optional[Dict[str, int]] = None) -> np.ndarray:
     """
     使用 misaki 将文本转换为 Kokoro 模型所需的 token ID 序列。
-    兼容处理 misaki 返回的元组 (phonemes, tokens)、字符串或列表形式。
+    支持从模型 config.json 动态传入精确 vocab 映射字典。
     """
     res = g2p(text)
 
@@ -236,8 +270,21 @@ def process_text_with_misaki(g2p, text: str) -> np.ndarray:
 
     logger.debug("音素转换结果: %s -> %s", text, phoneme_str)
 
+    # 使用从 config.json 解析出的精确词汇表；若无则回退到备用表
+    active_vocab = vocab if vocab is not None else VOCAB
+
     # 逐字符查表转换为 token ID
-    token_ids = [0] + [VOCAB.get(c, 0) for c in phoneme_str] + [0]
+    # 过滤掉不存在的字符，首尾各填充 0 (PAD)
+    matched_ids = [active_vocab[c] for c in phoneme_str if c in active_vocab]
+    if not matched_ids:
+        logger.warning("音素 '%s' 中的字符均未命中词汇表！", phoneme_str)
+        matched_ids = [0]
+
+    # Kokoro 模型上下文最大限制为 510 tokens (PLBERT max_position_embeddings=512)
+    if len(matched_ids) > 508:
+        matched_ids = matched_ids[:508]
+
+    token_ids = [0] + matched_ids + [0]
     return np.array([token_ids], dtype=np.int64)
 
 
@@ -306,9 +353,9 @@ def resolve_model_and_voices(
     model_dir: Optional[str] = None,
     model_path: Optional[str] = None,
     voices_path: Optional[str] = None,
-) -> Tuple[Path, Dict[str, np.ndarray]]:
+) -> Tuple[Path, Dict[str, np.ndarray], Optional[Dict[str, int]]]:
     """
-    自动查找并解析 Kokoro 模型与发音人声音数据。
+    自动查找并解析 Kokoro 模型、发音人声音数据以及官方 config.json 词汇表。
 
     支持多种形式:
       1. 官方 OpenVINO 目录:
@@ -345,10 +392,24 @@ def resolve_model_and_voices(
         )
 
     logger.info("已选定模型文件: %s", target_model_file)
+    base_dir = target_model_file.parent
+
+    # 尝试加载官方 config.json 中的 vocab 字典（保证中/英/日音标精准对齐）
+    vocab: Optional[Dict[str, int]] = None
+    config_file = base_dir / "config.json"
+    if config_file.exists():
+        try:
+            import json
+            with config_file.open("r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if "vocab" in cfg and isinstance(cfg["vocab"], dict):
+                vocab = cfg["vocab"]
+                logger.info("从 %s 成功载入官方模型词汇表 (包含 %d 个音标 token 符号)", config_file.name, len(vocab))
+        except Exception as e:
+            logger.warning("解析 %s 的 vocab 失败: %s", config_file, e)
 
     # 2. 确定声音资源位置
     voices: Dict[str, np.ndarray] = {}
-    base_dir = target_model_file.parent
 
     # 寻找声音来源（优先使用 voices_path，若未传则在模型同目录下查找）
     voice_sources: List[Path] = []
@@ -407,7 +468,7 @@ def resolve_model_and_voices(
             f"请检查路径: model_dir={model_dir}, voices_path={voices_path}"
         )
 
-    return target_model_file, voices
+    return target_model_file, voices, vocab
 
 
 # ===========================================================================
@@ -425,6 +486,7 @@ class TTSEventHandler(AsyncEventHandler):
         compiled_model: ov.CompiledModel,
         g2p_manager: MultiLangG2P,
         voices: Dict[str, np.ndarray],
+        vocab: Optional[Dict[str, int]] = None,
         default_voice_name: str,
         default_language: str,
         speed: float,
@@ -436,6 +498,7 @@ class TTSEventHandler(AsyncEventHandler):
         self.compiled_model = compiled_model
         self.g2p_manager = g2p_manager
         self.voices = voices
+        self.vocab = vocab
         self.default_voice_name = default_voice_name
         self.default_language = default_language
         self.speed = speed
@@ -487,24 +550,30 @@ class TTSEventHandler(AsyncEventHandler):
                 ).event()
             )
 
-            # 执行多语言 OpenVINO 语音合成
-            audio_bytes = await self.call_openvino(
-                text=text,
-                language=lang,
-                voice_name=voice_name,
-            )
+            # 3. 智能分句流式合成与分块发送:
+            # 保证长文本不会超出模型 512 上下文，并且首句生成完毕立刻出声，极大缩短等待时间！
+            chunks = split_text_into_chunks(text)
+            logger.debug("文本分句完成 (%d 句): %s", len(chunks), chunks)
 
-            # 分块发送音频数据
             chunk_size = 1024
-            for i in range(0, len(audio_bytes), chunk_size):
-                await self.write_event(
-                    AudioChunk(
-                        audio=audio_bytes[i : i + chunk_size],
-                        rate=self.sample_rate,
-                        width=2,
-                        channels=1,
-                    ).event()
+            for c_idx, chunk_text in enumerate(chunks, 1):
+                chunk_audio = await self.call_openvino(
+                    text=chunk_text,
+                    language=lang,
+                    voice_name=voice_name,
                 )
+                if not chunk_audio:
+                    continue
+
+                for i in range(0, len(chunk_audio), chunk_size):
+                    await self.write_event(
+                        AudioChunk(
+                            audio=chunk_audio[i : i + chunk_size],
+                            rate=self.sample_rate,
+                            width=2,
+                            channels=1,
+                        ).event()
+                    )
 
             # 发送音频流结束事件
             await self.write_event(AudioStop().event())
@@ -523,8 +592,8 @@ class TTSEventHandler(AsyncEventHandler):
         target_lang = language or self.default_language or "zh"
         g2p = self.g2p_manager.get_g2p(target_lang)
 
-        # 文本 → 音素 token IDs
-        tokens = process_text_with_misaki(g2p, text)
+        # 文本 → 音素 token IDs（传入官方精准 vocab 字典）
+        tokens = process_text_with_misaki(g2p, text, vocab=self.vocab)
 
         # 获取声音风格向量
         v_name = voice_name or self.default_voice_name
@@ -685,7 +754,7 @@ def main(
         raise typer.BadParameter("必须通过 --model-dir 指定模型目录，或通过 --model-path 指定模型文件。")
 
     # ---- 自动解析模型与声音资源 ----
-    resolved_model_file, voices = resolve_model_and_voices(
+    resolved_model_file, voices, vocab = resolve_model_and_voices(
         model_dir=model_dir,
         model_path=model_path,
         voices_path=voices_path,
@@ -771,6 +840,7 @@ def main(
                 compiled_model=compiled_model,
                 g2p_manager=g2p_manager,
                 voices=voices,
+                vocab=vocab,
                 default_voice_name=selected_voice,
                 default_language=default_lang,
                 speed=speed,

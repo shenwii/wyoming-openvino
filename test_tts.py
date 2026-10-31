@@ -88,7 +88,7 @@ def main(
     print(f"📖 待合成文本: {text}")
 
     # 1. 解析模型与声音
-    model_file, voices = resolve_model_and_voices(model_dir=model_dir)
+    model_file, voices, vocab = resolve_model_and_voices(model_dir=model_dir)
 
     all_voices = list(voices.keys())
     if not voice_name or voice_name not in voices:
@@ -111,39 +111,46 @@ def main(
 
     print(f"🌐 确定语言: {target_lang}")
     g2p = g2p_manager.get_g2p(target_lang)
-    tokens = process_text_with_misaki(g2p, text)
 
-    # 4. 提取适配的 style 向量
+    # 4. 文本切句与分段推理
+    _split_func = getattr(_mod, "split_text_into_chunks", lambda t: [t])
+    chunks = _split_func(text)
+    print(f"✂️  文本已拆分为 {len(chunks)} 个自然句子")
+
+    all_pcm = bytearray()
     voice_data = voices[voice_name]
-    token_len = tokens.shape[1]
-    if voice_data.ndim == 2:
-        idx = min(token_len, len(voice_data) - 1)
-        style = voice_data[idx : idx + 1]
-    elif voice_data.ndim == 3:
-        idx = min(token_len, len(voice_data) - 1)
-        style = voice_data[idx]
-    elif voice_data.ndim == 1:
-        style = voice_data[np.newaxis, :]
-    else:
-        style = voice_data
-
-    if style.shape != (1, 256):
-        style = style.reshape(1, 256)
-    style = style.astype(np.float32)
-
     speed_array = np.array([speed], dtype=np.float32)
 
-    # 5. 推理
-    print("⚡ 正在执行 OpenVINO 推理...")
-    output_ov = compiled_model([tokens, style, speed_array])
-    audio = output_ov[compiled_model.output(0)]
-    audio = np.squeeze(audio)
+    for i, chunk_text in enumerate(chunks, 1):
+        tokens = process_text_with_misaki(g2p, chunk_text, vocab=vocab)
+        token_len = tokens.shape[1]
+
+        if voice_data.ndim == 2:
+            idx = min(token_len, len(voice_data) - 1)
+            style = voice_data[idx : idx + 1]
+        elif voice_data.ndim == 3:
+            idx = min(token_len, len(voice_data) - 1)
+            style = voice_data[idx]
+        elif voice_data.ndim == 1:
+            style = voice_data[np.newaxis, :]
+        else:
+            style = voice_data
+
+        if style.shape != (1, 256):
+            style = style.reshape(1, 256)
+        style = style.astype(np.float32)
+
+        output_ov = compiled_model([tokens, style, speed_array])
+        audio = output_ov[compiled_model.output(0)]
+        audio = np.squeeze(audio)
+
+        audio = np.clip(audio, -1.0, 1.0)
+        pcm_chunk = (audio * 32767).astype(np.int16).tobytes()
+        all_pcm.extend(pcm_chunk)
+        print(f"   [{i}/{len(chunks)}] 合成完成: {chunk_text}")
 
     # 6. 转 16-bit PCM 并打包为 WAV 文件
-    audio = np.clip(audio, -1.0, 1.0)
-    pcm_bytes = (audio * 32767).astype(np.int16).tobytes()
-
-    wav_bytes = pcm_to_wav(pcm_bytes, sample_rate=24000)
+    wav_bytes = pcm_to_wav(bytes(all_pcm), sample_rate=24000)
 
     out_path = Path(output)
     out_path.write_bytes(wav_bytes)
