@@ -40,6 +40,13 @@ pip install -r requirements-tts.txt
 pip install -r requirements.txt
 ```
 
+> [!TIP]
+> `requirements-tts.txt` 中完整收录了 Kokoro 文本前端处理中/英/日所需的依赖：
+> - **英文依赖**：`spacy`, `num2words`
+> - **中文依赖**：`ordered-set`, `pypinyin`, `pypinyin-dict`, `jieba`, `cn2an`
+> - **日文依赖**：`fugashi`, `unidic-lite`, `jaconv`, `mojimoji`
+> - **声音依赖**：`torch`（用于解析官方 `.pt` 音色）
+
 ---
 
 ## 🧠 模型文件说明

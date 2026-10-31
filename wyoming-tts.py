@@ -153,7 +153,7 @@ class MultiLangG2P:
         except ImportError as exc:
             install_hint = {
                 "zh": "pip install ordered-set pypinyin pypinyin-dict jieba cn2an",
-                "en": "pip install num2words",
+                "en": "pip install spacy num2words",
                 "ja": "pip install fugashi unidic-lite jaconv mojimoji",
             }.get(lang, f"pip install 'misaki[{lang}]'")
 
