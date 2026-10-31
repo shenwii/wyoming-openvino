@@ -4,26 +4,28 @@ Wyoming TTS 服务
 ================
 基于 OpenVINO 加速的 Kokoro 文字转语音服务，通过 Wyoming 协议对接 Home Assistant。
 
-多语言与音色机制:
+模型支持:
+    - 原生支持官方 OpenVINO IR 模型目录（含 openvino_model.xml, openvino_model.bin 以及 voices/ 目录）
+    - 兼容支持 .onnx 模型及 voices.npy 声音打包文件
+    - 自动扫描 voices/ 目录下的所有 *.bin 声音文件，并在 Home Assistant 中全量注册
+
+多语言机制:
     - 语言优先采用 Wyoming 协议在请求中指定的语言（如 HA 配置的 voice.language）
-    - 若协议未指定语言，自动依据请求的发音人名称前缀推断（如 zf_* -> zh, jf_* -> ja, af_* -> en）
+    - 若协议未指定语言，自动依据选用的发音人前缀推断（zf_* -> zh, jf_* -> ja, af_* -> en 等）
     - 若仍未指定，根据待合成的文本内容自动推测（日文假名 -> ja, 汉字 -> zh, 字母 -> en）
-    - 命令行 --language 默认为 auto，完全可不传
-    - 启动时自动扫描并注册 voices.npy 中的全部发音人和语种供 Home Assistant 界面自由选择
+    - 命令行只需指定 --model-dir 即可自动就绪！
 
 使用示例:
-    # 默认无需传 --language 和 --voice-name，全部由 HA 或自动策略控制
-    python wyoming-tts.py \\
-        --model-path ./kokoro.onnx \\
-        --voices-path ./voices.npy \\
-        --device GPU
+    # 极简启动：直接传入下载的 Kokoro 官方 OpenVINO 目录
+    python wyoming-tts.py --model-dir ./Kokoro-82M-OpenVINO --device GPU
 """
 
 import asyncio
 import logging
 import re
 from functools import partial
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import openvino as ov
@@ -43,7 +45,7 @@ logger = logging.getLogger("wyoming-tts")
 # ---------------------------------------------------------------------------
 # Typer 命令行应用
 # ---------------------------------------------------------------------------
-app = typer.Typer(help="Wyoming TTS 服务 - 基于 OpenVINO 的多语言语音合成 (支持中/英/日等)")
+app = typer.Typer(help="Wyoming TTS 服务 - 基于 OpenVINO 的多语言语音合成")
 
 
 # ===========================================================================
@@ -54,7 +56,7 @@ _PUNCTUATION = ';:,.!?¡¿—…"«»"" '
 _LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _LETTERS_IPA = (
     "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴ"
-    "øɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃ"
+    "øɵɸθœɶʘɹɺɾɻʀʁɽʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃ"
     "ˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̈̃ˡ̩"
 )
 _SYMBOLS = [_PAD] + list(_PUNCTUATION) + list(_LETTERS) + list(_LETTERS_IPA)
@@ -62,15 +64,15 @@ VOCAB: Dict[str, int] = {s: i for i, s in enumerate(_SYMBOLS)}
 
 # Kokoro 声音名称前缀与语言代码的对应
 VOICE_PREFIX_TO_LANG: Dict[str, str] = {
-    "a": "en",  # American English
-    "b": "en",  # British English
-    "z": "zh",  # Chinese (Mandarin)
-    "j": "ja",  # Japanese
-    "e": "es",  # Spanish
-    "f": "fr",  # French
-    "h": "hi",  # Hindi
-    "i": "it",  # Italian
-    "p": "pt",  # Portuguese
+    "a": "en",  # American English (af_*, am_*)
+    "b": "en",  # British English (bf_*, bm_*)
+    "z": "zh",  # Chinese Mandarin (zf_*, zm_*)
+    "j": "ja",  # Japanese (jf_*, jm_*)
+    "e": "es",  # Spanish (ef_*, em_*)
+    "f": "fr",  # French (ff_*)
+    "h": "hi",  # Hindi (hf_*, hm_*)
+    "i": "it",  # Italian (if_*, im_*)
+    "p": "pt",  # Portuguese (pf_*, pm_*)
     "k": "ko",  # Korean
 }
 
@@ -166,18 +168,12 @@ class MultiLangG2P:
             - 纯拉丁字母/英文 → 英语 (en)
             - 无法判定（如数字或标点） → 回退到兜底语言
         """
-        # 日文平假名/片假名范围
         if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text):
             return "ja"
-
-        # 中文字符范围
         if re.search(r"[\u4E00-\u9FFF]", text):
             return "zh"
-
-        # 包含英文字母
         if re.search(r"[a-zA-Z]", text):
             return "en"
-
         return self.fallback_language or "zh"
 
 
@@ -203,6 +199,116 @@ def process_text_with_misaki(g2p, text: str) -> np.ndarray:
 
 
 # ===========================================================================
+# 模型与声音资源自动解析工具
+# ===========================================================================
+def resolve_model_and_voices(
+    model_dir: Optional[str] = None,
+    model_path: Optional[str] = None,
+    voices_path: Optional[str] = None,
+) -> Tuple[Path, Dict[str, np.ndarray]]:
+    """
+    自动查找并解析 Kokoro 模型与发音人声音数据。
+
+    支持两种形式:
+      1. 官方 OpenVINO 目录:
+         包含 openvino_model.xml, openvino_model.bin 以及 voices/*.bin
+      2. 单文件形式:
+         --model-path 指定 .xml 或 .onnx，--voices-path 指定 voices 目录或 .npy 文件
+    """
+    # 1. 确定模型路径
+    target_model_file: Optional[Path] = None
+
+    if model_path:
+        p = Path(model_path)
+        if p.is_dir():
+            # 用户传的是目录
+            candidates = [p / "openvino_model.xml", p / "model.xml"] + list(p.glob("*.xml")) + list(p.glob("*.onnx"))
+            for cand in candidates:
+                if cand.exists():
+                    target_model_file = cand
+                    break
+        elif p.exists():
+            target_model_file = p
+
+    if not target_model_file and model_dir:
+        d = Path(model_dir)
+        candidates = [d / "openvino_model.xml", d / "model.xml"] + list(d.glob("*.xml")) + list(d.glob("*.onnx"))
+        for cand in candidates:
+            if cand.exists():
+                target_model_file = cand
+                break
+
+    if not target_model_file or not target_model_file.exists():
+        raise FileNotFoundError(
+            f"未找到 Kokoro 模型文件（openvino_model.xml 或 *.onnx）。"
+            f"请检查传入的路径: model_dir={model_dir}, model_path={model_path}"
+        )
+
+    logger.info("已选定模型文件: %s", target_model_file)
+
+    # 2. 确定声音资源位置
+    voices: Dict[str, np.ndarray] = {}
+    base_dir = target_model_file.parent
+
+    # 寻找声音来源（优先使用 voices_path，若未传则在模型同目录下查找）
+    voice_sources: List[Path] = []
+    if voices_path:
+        voice_sources.append(Path(voices_path))
+    if model_dir:
+        voice_sources.append(Path(model_dir) / "voices")
+        voice_sources.append(Path(model_dir) / "voices.npy")
+    voice_sources.append(base_dir / "voices")
+    voice_sources.append(base_dir / "voices.npy")
+
+    for src in voice_sources:
+        if not src.exists():
+            continue
+
+        # 场景 A: voices 目录（包含众多 *.bin 单个音色文件，如官方 OpenVINO 仓库）
+        if src.is_dir():
+            bin_files = list(src.glob("*.bin"))
+            if bin_files:
+                logger.info("在目录 %s 中找到 %d 个 .bin 声音文件", src, len(bin_files))
+                for bf in bin_files:
+                    v_name = bf.stem  # 如 'af_heart'
+                    try:
+                        # 官方 Kokoro .bin 文件为 float32 原始二进制向量
+                        # shape 典型为 (-1, 1, 256) 或 (-1, 256)
+                        data = np.fromfile(bf, dtype=np.float32)
+                        if data.size % 256 == 0:
+                            data = data.reshape(-1, 256)
+                        voices[v_name] = data
+                    except Exception as err:
+                        logger.warning("加载声音文件 %s 失败: %s", bf, err)
+                if voices:
+                    break
+
+        # 场景 B: voices.npy / .npz 单个打包文件
+        elif src.is_file() and (src.suffix in [".npy", ".npz"] or src.name == "voices.bin"):
+            try:
+                voices_raw = np.load(src, allow_pickle=True)
+                if isinstance(voices_raw, np.ndarray) and voices_raw.ndim == 0:
+                    voices = voices_raw.item()
+                elif hasattr(voices_raw, "files"):
+                    voices = {name: voices_raw[name] for name in voices_raw.files}
+                elif isinstance(voices_raw, dict):
+                    voices = voices_raw
+                if voices:
+                    logger.info("从打包文件 %s 成功加载 %d 个声音", src, len(voices))
+                    break
+            except Exception as err:
+                logger.warning("解析打包文件 %s 失败: %s", src, err)
+
+    if not voices:
+        raise FileNotFoundError(
+            f"未找到可用的声音数据（未在 voices/ 目录下找到 *.bin 或 voices.npy 文件）。"
+            f"请检查声音目录或指定 --voices-path"
+        )
+
+    return target_model_file, voices
+
+
+# ===========================================================================
 # Wyoming 事件处理器
 # ===========================================================================
 class TTSEventHandler(AsyncEventHandler):
@@ -216,7 +322,7 @@ class TTSEventHandler(AsyncEventHandler):
         wyoming_info: Info,
         compiled_model: ov.CompiledModel,
         g2p_manager: MultiLangG2P,
-        voices: dict,
+        voices: Dict[str, np.ndarray],
         default_voice_name: str,
         default_language: str,
         speed: float,
@@ -237,11 +343,9 @@ class TTSEventHandler(AsyncEventHandler):
         """处理 Wyoming 协议事件。"""
 
         if Describe.is_type(event.type):
-            # ---- 服务描述请求 ----
             await self.write_event(self.wyoming_info.event())
 
         elif Synthesize.is_type(event.type):
-            # ---- 语音合成请求 ----
             synth = Synthesize.from_event(event)
             text = synth.text
 
@@ -259,17 +363,14 @@ class TTSEventHandler(AsyncEventHandler):
                 voice_name = synth.voice.name
 
             # 2. 确定语言：
-            # 策略一：优先读取协议显式指定的语言
             lang = None
             if synth.voice and synth.voice.language:
                 lang = synth.voice.language.split("-")[0].lower()
 
-            # 策略二：若未指定，依据选定的声音名称前缀推导语言
             if not lang and voice_name:
                 prefix = voice_name[0].lower()
                 lang = VOICE_PREFIX_TO_LANG.get(prefix)
 
-            # 策略三：若仍未确定（或设为 auto），依据合成文本内容自动检测（假名->ja, 汉字->zh, 字母->en）
             if not lang or lang == "auto":
                 lang = self.g2p_manager.detect_language_from_text(text)
 
@@ -325,14 +426,27 @@ class TTSEventHandler(AsyncEventHandler):
 
         # 获取声音风格向量
         v_name = voice_name or self.default_voice_name
-        style = self.voices.get(v_name)
-        if style is None:
+        voice_data = self.voices.get(v_name)
+        if voice_data is None:
             first_key = next(iter(self.voices))
             logger.warning("未找到声音 '%s'，自动回退至 '%s'", v_name, first_key)
-            style = self.voices[first_key]
+            voice_data = self.voices[first_key]
 
-        if style.ndim == 1:
-            style = style[np.newaxis, :]
+        # 提取当前 token 长度适配的 style 向量
+        # Kokoro 的 voice embedding 文件通常包含按序列长度索引的向量
+        token_len = tokens.shape[1]
+        if voice_data.ndim == 2:
+            # shape: (N, 256)
+            idx = min(token_len, len(voice_data) - 1)
+            style = voice_data[idx : idx + 1]  # shape: (1, 256)
+        elif voice_data.ndim == 3:
+            # shape: (N, 1, 256)
+            idx = min(token_len, len(voice_data) - 1)
+            style = voice_data[idx]            # shape: (1, 256)
+        elif voice_data.ndim == 1:
+            style = voice_data[np.newaxis, :]  # shape: (1, 256)
+        else:
+            style = voice_data
 
         speed_array = np.array([self.speed], dtype=np.float32)
 
@@ -374,22 +488,27 @@ class TTSEventHandler(AsyncEventHandler):
 # ===========================================================================
 @app.command()
 def main(
-    model_path: str = typer.Option(
-        ...,
-        "--model-path",
+    model_dir: Optional[str] = typer.Option(
+        None,
+        "--model-dir",
         "-m",
-        help="Kokoro OpenVINO 模型文件路径（.xml 或 .onnx）",
+        help="Kokoro OpenVINO 模型目录路径（自动定位 openvino_model.xml 及 voices/ 目录）",
     ),
-    voices_path: str = typer.Option(
-        ...,
+    model_path: Optional[str] = typer.Option(
+        None,
+        "--model-path",
+        help="指定 Kokoro 模型文件（.xml 或 .onnx，若已指定 --model-dir 可不填）",
+    ),
+    voices_path: Optional[str] = typer.Option(
+        None,
         "--voices-path",
         "-v",
-        help="声音风格文件路径（.npy，字典格式 {name: vector}）",
+        help="指定声音目录或文件（若已指定 --model-dir 且包含 voices/ 目录可不填）",
     ),
     voice_name: Optional[str] = typer.Option(
         None,
         "--voice-name",
-        help="默认声音名称（不指定则自动选用声音文件中的第一个声音；HA 发起请求时优先遵循 HA 选定的声音）",
+        help="默认声音名称（默认自动取声音文件列表中的首个；HA 发起请求时优先遵循 HA 选定的声音）",
     ),
     host: str = typer.Option(
         "0.0.0.0",
@@ -436,7 +555,7 @@ def main(
         help="日志级别（DEBUG / INFO / WARNING / ERROR）",
     ),
 ) -> None:
-    """启动基于 OpenVINO 的 Wyoming TTS 服务，支持多语言自动推测与协议动态选择。"""
+    """启动基于 OpenVINO 的 Wyoming TTS 服务，原生支持官方 OpenVINO IR 格式与 voices/*.bin 声音。"""
 
     # 初始化日志系统
     logging.basicConfig(
@@ -444,39 +563,31 @@ def main(
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    logger.info("正在加载 TTS 模型: %s", model_path)
-    logger.info("推理设备: %s", device)
+    if not model_dir and not model_path:
+        raise typer.BadParameter("必须通过 --model-dir 指定模型目录，或通过 --model-path 指定模型文件。")
+
+    # ---- 自动解析模型与声音资源 ----
+    resolved_model_file, voices = resolve_model_and_voices(
+        model_dir=model_dir,
+        model_path=model_path,
+        voices_path=voices_path,
+    )
+
+    all_voice_names = list(voices.keys())
+    selected_voice = voice_name
+    if not selected_voice or selected_voice not in voices:
+        selected_voice = all_voice_names[0]
+
+    logger.info("已加载 %d 个声音，默认声音: %s", len(all_voice_names), selected_voice)
 
     # ---- 初始化 OpenVINO 推理引擎 ----
     core = ov.Core()
     logger.info("可用推理设备: %s", core.available_devices)
+    logger.info("正在加载并编译模型: %s (设备: %s)", resolved_model_file, device)
 
-    model = core.read_model(model_path)
+    model = core.read_model(str(resolved_model_file))
     compiled_model = core.compile_model(model, device)
-    logger.info("模型编译完毕 (设备: %s)", device)
-
-    # ---- 加载声音风格文件 ----
-    logger.info("加载声音风格文件: %s", voices_path)
-    voices_raw = np.load(voices_path, allow_pickle=True)
-
-    if isinstance(voices_raw, np.ndarray) and voices_raw.ndim == 0:
-        voices = voices_raw.item()
-    elif hasattr(voices_raw, "files"):
-        voices = {name: voices_raw[name] for name in voices_raw.files}
-    else:
-        voices = voices_raw
-
-    if not isinstance(voices, dict):
-        raise typer.BadParameter("voices 文件内容必须为声音字典对象")
-
-    all_voice_names = list(voices.keys())
-    logger.info("已加载 %d 个声音", len(all_voice_names))
-
-    # 确定默认声音名称
-    selected_voice = voice_name
-    if not selected_voice or selected_voice not in voices:
-        selected_voice = all_voice_names[0]
-        logger.info("未指定或未匹配到默认声音，自动选用首个声音: %s", selected_voice)
+    logger.info("模型编译完毕")
 
     # ---- 初始化多语言 G2P 管理器 ----
     default_lang = language or "auto"
@@ -511,7 +622,12 @@ def main(
 
     # ---- 启动 Wyoming 异步服务 ----
     server = AsyncServer.from_uri(f"tcp://{host}:{port}")
-    logger.info("TTS 服务启动: %s:%d (共注册 %d 个声音，支持自动语言识别与 HA 动态指定)", host, port, len(tts_voices))
+    logger.info(
+        "TTS 服务启动: %s:%d (共注册 %d 个声音，支持自动语言识别与 HA 动态指定)",
+        host,
+        port,
+        len(tts_voices),
+    )
 
     asyncio.run(
         server.run(
