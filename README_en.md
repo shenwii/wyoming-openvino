@@ -13,10 +13,16 @@ Wyoming Protocol + Intel OpenVINO: High-performance Speech-to-Text (STT) and Tex
   - **STT (Whisper)**: Direct support for Whisper models exported via Optimum/OpenVINO.
 - **Unified & Minimal CLI Experience**:
   - Both STT and TTS services accept a single `--model-dir` parameter to automatically resolve model graphs, weights, and all available speaker voicepacks.
+- **Smart Chunking & Low-Latency Streaming (Learned from Kokoro-FastAPI)**:
+  - Abbreviation and Decimal Guard: Prevents improper sentence breaking on `Dr.`, `Mr.`, `etc.`, `e.g.`, or floating numbers (e.g., `3.14`).
+  - Acoustic Punctuation Retention: Preserves trailing punctuation (`。！？!?`) so Kokoro generates natural intonation, cadences, and pauses.
+  - Sentence-level streaming playback: First sentence speaks in ~1 second via Wyoming audio chunks, completely eliminating long waits for long paragraphs.
+- **Weighted Voice Blending / Mixing**:
+  - Supports Kokoro-FastAPI voice blending syntax such as `zf_xiaobei(0.7)+af_heart(0.3)`, `af_bella(2)+af_sky(1)`, or `zf_xiaobei+af_heart` to dynamically mix speaker timbres with normalized weights.
 - **Dynamic Multilingual Support & Auto Language Routing**:
   - `--language` defaults to `auto` (can be omitted entirely).
   - **STT**: Prioritizes language specified by Home Assistant Wyoming requests; falls back to Whisper's native automatic language detection (supporting 90+ languages including English, Chinese, and Japanese).
-  - **TTS**: Automatically routes G2P engines based on the requested voice prefix (`zf_*` -> Chinese, `jf_*` -> Japanese, `af_*` -> English) or through text character heuristics (Kanji/Kana/Latin).
+  - **TTS**: Automatically routes G2P engines based on the requested voice prefix (`zf_*` -> Chinese, `jf_*` -> Japanese, `af_*` -> English) or through text character heuristics (Kanji/Kana/Latin). Chinese-English mixed text routes embedded English through `en_callable` with `EspeakFallback` fallback, while pure English clauses seamlessly use native English phonemes.
 - **Intel Hardware Acceleration**:
   - Supports `GPU` (Intel Arc dGPU / iGPU), `CPU`, `AUTO`, and `MULTI:CPU,GPU` hybrid execution.
 
@@ -104,6 +110,22 @@ python wyoming-tts.py \
 > [!TIP]
 > **Speed Recommendation**: The default `1.0` speed can sound slightly hurried for Chinese and Japanese. Setting `--speed 0.85` (or `0.8`) delivers a significantly more natural and relaxed pacing.
 > **Device Recommendation**: `CPU` is recommended for Kokoro-82M-FP16 due to IR operator compatibility and fast response latency.
+
+### 3. Standalone Testing & WAV Export (`test_tts.py`)
+
+Test speech synthesis and voice blending locally without Home Assistant and output standard WAV audio files:
+
+```bash
+# Basic Mandarin synthesis
+python test_tts.py "我来测试一下语音合成的效果。" --model-dir /path/to/Kokoro-82M-FP16-OpenVINO -o test.wav
+
+# Voice blending (70% Chinese female + 30% English female)
+python test_tts.py "今天天气真好，我们来测试 OpenVINO 语音合成。" \
+    --model-dir /path/to/Kokoro-82M-FP16-OpenVINO \
+    -v "zf_xiaobei(0.7)+af_heart(0.3)" \
+    --speed 0.85 \
+    -o blend.wav
+```
 
 ---
 

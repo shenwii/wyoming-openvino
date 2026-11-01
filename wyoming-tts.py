@@ -83,6 +83,33 @@ VOICE_PREFIX_TO_LANG: Dict[str, str] = {
 # ===========================================================================
 # 多语言 G2P（字素到音素）转换管理器
 # ===========================================================================
+def extract_phonemes(res) -> str:
+    """从 misaki 返回的各种复杂数据结构（元组、字符串、对象、分段列表）中稳健提取音素字符串。"""
+    if not res:
+        return ""
+    if isinstance(res, tuple):
+        return res[0] if res else ""
+    elif isinstance(res, str):
+        return res
+    elif hasattr(res, "phonemes"):
+        return res.phonemes
+    elif isinstance(res, list):
+        parts = []
+        for item in res:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, tuple) and len(item) >= 2:
+                parts.append(str(item[1] if item[1] is not None else item[0]))
+            elif isinstance(item, tuple) and len(item) == 1:
+                parts.append(str(item[0]))
+            elif hasattr(item, "phonemes"):
+                parts.append(str(item.phonemes))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(res)
+
+
 class MultiLangG2P:
     """
     多语言 G2P 转换管理器。
@@ -94,10 +121,17 @@ class MultiLangG2P:
         self._g2p_instances: Dict[str, object] = {}
 
     def get_g2p(self, language: Optional[str] = None):
-        """获取指定语言的 G2P 实例（按需加载并缓存）。"""
+        """获取指定语言的 G2P 实例（按需加载并缓存）。支持单字母与 ISO 语言代码。"""
         lang = (language or self.fallback_language or "zh").split("-")[0].lower()
-        if lang == "auto":
+        if lang == "auto" or not lang:
             lang = self.fallback_language or "zh"
+
+        # 标准化映射：支持 Kokoro-FastAPI 的单字母代码与标准 ISO 语言代码互通
+        lang_norm_map = {
+            "z": "zh", "j": "ja", "a": "en", "b": "en",
+            "e": "es", "f": "fr", "h": "hi", "i": "it", "p": "pt", "k": "ko"
+        }
+        lang = lang_norm_map.get(lang, lang)
 
         if lang in self._g2p_instances:
             return self._g2p_instances[lang]
@@ -109,14 +143,14 @@ class MultiLangG2P:
     def _create_g2p(self, lang: str):
         """创建对应语言的 misaki G2P 引擎。"""
         try:
-            if lang == "zh":
+            if lang in ("zh", "z"):
                 from misaki import zh
                 cls = getattr(zh, "ZHG2P", None) or getattr(zh, "G2P", None)
                 if cls is None:
                     raise ImportError("无法在 misaki.zh 中找到 ZHG2P 类")
                 logger.info("已加载中文 G2P 引擎 (misaki.zh.%s)", cls.__name__)
 
-                # 优化英文单词回调：无多余空格污染，带 LRU 高速缓存
+                # 优化英文单词回调：无多余空格污染，稳健提取音素，带 LRU 高速缓存
                 @lru_cache(maxsize=1024)
                 def fast_en_callable(w: str) -> str:
                     w = w.strip()
@@ -125,26 +159,41 @@ class MultiLangG2P:
                     try:
                         en_engine = self.get_g2p("en")
                         res = en_engine(w)
-                        phonemes = res[0] if isinstance(res, tuple) else str(res)
-                        return phonemes.strip()
+                        return extract_phonemes(res).strip()
                     except Exception:
                         return w
 
-                # 优先采用官方推荐的 version="1.1"（对中英混排有完整优化）
+                # 兼容不同 misaki 版本的 ZHG2P 初始化参数 (优先 version="1.1"，其次 None，再次无参)
                 try:
                     return cls(version="1.1", en_callable=fast_en_callable)
-                except TypeError:
-                    return cls(en_callable=fast_en_callable)
+                except (TypeError, ValueError):
+                    try:
+                        return cls(version=None, en_callable=fast_en_callable)
+                    except (TypeError, ValueError):
+                        return cls(en_callable=fast_en_callable)
 
-            elif lang == "en":
+            elif lang in ("en", "a", "b"):
                 from misaki import en
                 cls = getattr(en, "G2P", None) or getattr(en, "ENG2P", None)
                 if cls is None:
                     raise ImportError("无法在 misaki.en 中找到 G2P 类")
                 logger.info("已加载英文 G2P 引擎 (misaki.en.%s)", cls.__name__)
-                return cls(trf=False)
 
-            elif lang == "ja":
+                # 尝试启用 espeak fallback 兜底处理生僻/超出词表的英文单词（参考 Kokoro-FastAPI）
+                fallback = None
+                try:
+                    from misaki import espeak
+                    fallback = espeak.EspeakFallback(british=(lang in ("b", "gb")))
+                    logger.debug("已为英文 G2P 启用 EspeakFallback 兜底")
+                except Exception as e:
+                    logger.debug("未启用 EspeakFallback (可选): %s", e)
+
+                try:
+                    return cls(trf=False, british=(lang in ("b", "gb")), fallback=fallback)
+                except TypeError:
+                    return cls(trf=False)
+
+            elif lang in ("ja", "j"):
                 from misaki import ja
                 cls = getattr(ja, "JAG2P", None) or getattr(ja, "G2P", None)
                 if cls is None:
@@ -152,32 +201,32 @@ class MultiLangG2P:
                 logger.info("已加载日文 G2P 引擎 (misaki.ja.%s)", cls.__name__)
                 return cls()
 
-            elif lang == "es":
+            elif lang in ("es", "e"):
                 from misaki import es
                 cls = getattr(es, "ESG2P", None) or getattr(es, "G2P", None)
                 return cls()
 
-            elif lang == "fr":
+            elif lang in ("fr", "f"):
                 from misaki import fr
                 cls = getattr(fr, "FRG2P", None) or getattr(fr, "G2P", None)
                 return cls()
 
-            elif lang == "hi":
+            elif lang in ("hi", "h"):
                 from misaki import hi
                 cls = getattr(hi, "HIG2P", None) or getattr(hi, "G2P", None)
                 return cls()
 
-            elif lang == "it":
+            elif lang in ("it", "i"):
                 from misaki import it
                 cls = getattr(it, "ITG2P", None) or getattr(it, "G2P", None)
                 return cls()
 
-            elif lang == "pt":
+            elif lang in ("pt", "p"):
                 from misaki import pt
                 cls = getattr(pt, "PTG2P", None) or getattr(pt, "G2P", None)
                 return cls()
 
-            elif lang == "ko":
+            elif lang in ("ko", "k"):
                 from misaki import ko
                 cls = getattr(ko, "KOG2P", None) or getattr(ko, "G2P", None)
                 return cls()
@@ -218,52 +267,98 @@ class MultiLangG2P:
         return self.fallback_language or "zh"
 
 
+# 常见英语缩写词（句中出现时不应作为句子断句分割，参考 Kokoro-FastAPI Issue #308 / PR #520）
+COMMON_ABBREVIATIONS = (
+    r"Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e|approx|app|dept|min|max|fig|no|vol|"
+    r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec|St|Ave|Rd|Corp|Inc|Ltd|Co"
+)
+
+
 def normalize_mixed_text(text: str) -> str:
     """
-    对中英文混合文本进行预清洗：
-    1. 在中文字符与英文单词交界处自动补全空格，避免发音黏连；
-    2. 将常见的 2~4 位全大写缩写词（如 AI, CPU, GPU, TTS）展开为按字母读音（如 A I, C P U）。
+    对中英日混合文本进行预清洗与规范化:
+    1. 中文字符与英文字母边界补空格，避免发音黏连；
+    2. 常见全大写缩写词（如 AI, CPU, GPU, TTS, USB, IoT）展开为空格分隔读音（如 A I, C P U）；
+    3. 全角空格转半角，规范化标点空白。
     """
-    # 中英文边界补空格
+    text = text.replace("\u3000", " ")
+    # 中文字符与英文字母边界补空格
     text = re.sub(r"([\u4e00-\u9fff])([a-zA-Z])", r"\1 \2", text)
     text = re.sub(r"([a-zA-Z])([\u4e00-\u9fff])", r"\1 \2", text)
     # 大写缩写展开（如 AI -> A I）
     text = re.sub(r"\b([A-Z]{2,4})\b", lambda m: " ".join(list(m.group(1))), text)
+    # 多空格压缩
+    text = re.sub(r"[ \t]+", " ", text)
     return text
+
+
+def smart_sentence_split(text: str) -> List[str]:
+    """
+    智能句子切分算法（借鉴 Kokoro-FastAPI 的 UAX #29 文本分割思想）：
+    1. 保护缩写词中的点（如 Dr. Wang, etc., e.g.）以及浮点数（如 3.14, 0.85），避免被误切断；
+    2. 兼容中日英文句子结束符（。！？!? 以及英文句号加空格）；
+    3. 保留句末标点符号，确保送入 Kokoro 模型时具备自然的语调起伏与停顿；
+    4. 消除括号、多重标点引发的错误分割。
+    """
+    if not text:
+        return []
+
+    # 1. 临时占位符保护英文缩写和浮点数中的 '.'
+    protected_text = re.sub(r"(\d)\.(\d)", r"\g<1>" + "\u200b" + r"\g<2>", text)
+    protected_text = re.sub(
+        rf"\b({COMMON_ABBREVIATIONS})\.",
+        r"\g<1>" + "\u200b",
+        protected_text,
+        flags=re.IGNORECASE,
+    )
+    protected_text = re.sub(r"\b([A-Z])\.", r"\g<1>" + "\u200b", protected_text)
+
+    # 2. 匹配主句结束符：中日句号问叹标点 [。！？!?] 或 英文句号后接空白/换行/行尾
+    # 同时保留标点附在句尾
+    sentence_pattern = r"([^。！？!?\n]+(?:[。！？!?]+|\.(?=\s|$))?)"
+    raw_sentences = [s.strip() for s in re.findall(sentence_pattern, protected_text) if s.strip()]
+
+    # 3. 恢复占位符
+    sentences = [s.replace("\u200b", ".") for s in raw_sentences]
+    return sentences if sentences else [text]
 
 
 def split_text_into_chunks(text: str, max_chunk_chars: int = 70) -> List[str]:
     """
-    将长文本智能按中英文句号、分号、问号、感叹号、换行符切分为自然的语音分句（默认约50-70字/句）。
-    优势:
-      1. 确保单次推理耗时极短（仅需 1~2 秒即可输出第一句）；
-      2. Wyoming 流式首句秒级即时发声，彻底消除整篇等待 13 秒的停顿感；
-      3. 确保任何大长文本绝不会超出 Kokoro 的 512 上下文限制。
+    将长文本智能切分为自然的语音分句（默认约 50-70 字/句）。
+    整合 Kokoro-FastAPI 的 UAX #29 智能断句、缩写保护与自然从句切分:
+      1. 保护英文缩写（Dr., etc.）与浮点数（3.14），绝不截断；
+      2. 完整保留句尾标点（。！？!?），提供自然声学停顿；
+      3. 超长句子按从句次级标点（分号、逗号、破折号）平滑分块；
+      4. Wyoming 流式首句秒级即时发声，彻底消除整篇等待。
     """
     text = normalize_mixed_text(text.strip())
     if not text:
         return []
 
-    # 优先按换行符和主要句子结束标点分割，保留标点符号
-    pattern = r"([^。！？\n!?;\r]+[。！？\n!?;]*)"
-    raw_sentences = re.findall(pattern, text)
-    if not raw_sentences:
-        raw_sentences = [text]
+    sentences = smart_sentence_split(text)
+    chunks: List[str] = []
 
-    chunks = []
-    current_chunk = ""
-    for s in raw_sentences:
-        s = s.strip()
-        if not s:
+    for sentence in sentences:
+        if len(sentence) <= max_chunk_chars:
+            chunks.append(sentence)
             continue
-        if len(current_chunk) + len(s) > max_chunk_chars and current_chunk:
-            chunks.append(current_chunk)
-            current_chunk = s
-        else:
-            current_chunk += (" " if current_chunk and s and s[0].isalnum() else "") + s
 
-    if current_chunk:
-        chunks.append(current_chunk)
+        # 如果单个句子超出 max_chunk_chars，按次级从句标点切分
+        clause_pattern = r"([^；;，,、:—\r\n]+[；;，,、:—]*)"
+        raw_clauses = [c.strip() for c in re.findall(clause_pattern, sentence) if c.strip()]
+        if not raw_clauses:
+            raw_clauses = [sentence]
+
+        current_chunk = ""
+        for clause in raw_clauses:
+            if len(current_chunk) + len(clause) > max_chunk_chars and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = clause
+            else:
+                current_chunk += (" " if current_chunk and clause and clause[0].isalnum() else "") + clause
+        if current_chunk:
+            chunks.append(current_chunk)
 
     return chunks
 
@@ -274,26 +369,7 @@ def process_text_with_misaki(g2p, text: str, vocab: Optional[Dict[str, int]] = N
     支持从模型 config.json 动态传入精确 vocab 映射字典。
     """
     res = g2p(text)
-
-    # 1. 若返回 (phonemes, tokens) 元组（misaki.en 的标准输出）
-    if isinstance(res, tuple):
-        phoneme_str = res[0] if res else ""
-    # 2. 若直接返回音素字符串（misaki.zh / ja 常见输出）
-    elif isinstance(res, str):
-        phoneme_str = res
-    # 3. 若返回列表（部分分段处理输出）
-    elif isinstance(res, list):
-        parts = []
-        for item in res:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, tuple) and len(item) >= 2:
-                parts.append(item[1] if item[1] is not None else "")
-            elif isinstance(item, tuple) and len(item) == 1:
-                parts.append(str(item[0]))
-        phoneme_str = "".join(parts)
-    else:
-        phoneme_str = str(res)
+    phoneme_str = extract_phonemes(res)
 
     if not phoneme_str:
         logger.warning("文本 '%s' 未能提取出有效音素", text)
@@ -378,6 +454,121 @@ def load_voice_file(file_path: Path) -> np.ndarray:
         return arr
 
     raise ValueError(f"不支持的声音文件格式: {suffix}")
+
+
+# ===========================================================================
+# 发音人多音色线性融合 (Kokoro-FastAPI 声音混合机制)
+# ===========================================================================
+_BLENDED_VOICES_CACHE: Dict[str, np.ndarray] = {}
+
+
+def parse_voice_blend(voice_spec: str) -> List[Tuple[str, float]]:
+    """
+    解析发音人混合表达式（借鉴 Kokoro-FastAPI 声音融合语法）。
+    支持格式:
+      - 单音色: 'zf_xiaobei' 或 'af_heart'
+      - 均等权重混合: 'zf_xiaobei+af_heart'
+      - 自定义权重混合: 'zf_xiaobei(0.7)+af_heart(0.3)' 或 'af_bella(2)+af_sky(1)'
+    """
+    if not voice_spec or not voice_spec.strip():
+        return []
+
+    parts = [p.strip() for p in voice_spec.split("+") if p.strip()]
+    blend_list: List[Tuple[str, float]] = []
+    pattern = re.compile(r"^([a-zA-Z0-9_\-\.]+)(?:\(([0-9.]+)\))?$")
+
+    for part in parts:
+        m = pattern.match(part)
+        if m:
+            v_name = m.group(1).strip()
+            weight = float(m.group(2)) if m.group(2) is not None else 1.0
+            blend_list.append((v_name, weight))
+        else:
+            blend_list.append((part, 1.0))
+
+    total_weight = sum(w for _, w in blend_list)
+    if total_weight > 0:
+        blend_list = [(name, w / total_weight) for name, w in blend_list]
+    return blend_list
+
+
+def get_or_blend_voice(voices: Dict[str, np.ndarray], voice_spec: Optional[str]) -> np.ndarray:
+    """
+    获取单发音人音色或融合多发音人音色（支持 Kokoro-FastAPI 风格的多音色加权线性融合）。
+    """
+    if not voices:
+        raise ValueError("发音人列表为空，无法获取声音！")
+
+    if not voice_spec:
+        first_key = next(iter(voices))
+        return voices[first_key]
+
+    voice_spec = voice_spec.strip()
+
+    # 1. 直接命中已加载单发音人
+    if voice_spec in voices:
+        return voices[voice_spec]
+
+    # 2. 检查融合缓存
+    if voice_spec in _BLENDED_VOICES_CACHE:
+        return _BLENDED_VOICES_CACHE[voice_spec]
+
+    # 3. 混合发音人解析
+    blend_specs = parse_voice_blend(voice_spec)
+    if not blend_specs:
+        first_key = next(iter(voices))
+        return voices[first_key]
+
+    if len(blend_specs) == 1:
+        v_name = blend_specs[0][0]
+        if v_name in voices:
+            return voices[v_name]
+        logger.warning("未找到发音人 '%s'，使用默认发音人", v_name)
+        first_key = next(iter(voices))
+        return voices[first_key]
+
+    # 多音色加权线性融合
+    arrays = []
+    weights = []
+    for v_name, weight in blend_specs:
+        if v_name in voices:
+            arr = voices[v_name]
+            arrays.append(arr)
+            weights.append(weight)
+        else:
+            logger.warning("发音人混合中未找到音色 '%s'，已跳过", v_name)
+
+    if not arrays:
+        logger.warning("发音人混合表达式 '%s' 中的所有音色均未命中，使用默认发音人", voice_spec)
+        first_key = next(iter(voices))
+        return voices[first_key]
+
+    # 归一化可用音色的权重
+    w_sum = sum(weights)
+    if w_sum > 0:
+        weights = [w / w_sum for w in weights]
+    else:
+        weights = [1.0 / len(weights)] * len(weights)
+
+    # 确保统一对齐维度并裁切到最小长度
+    min_len = min(a.shape[0] if a.ndim >= 2 else 1 for a in arrays)
+
+    standardized_arrays = []
+    for a in arrays:
+        if a.ndim == 1:
+            standardized_arrays.append(a.reshape(1, -1))
+        elif a.ndim == 3:
+            standardized_arrays.append(a.squeeze(0)[:min_len])
+        else:
+            standardized_arrays.append(a[:min_len])
+
+    blended = np.zeros_like(standardized_arrays[0][:min_len], dtype=np.float32)
+    for arr, w in zip(standardized_arrays, weights):
+        blended += arr[:min_len].astype(np.float32) * float(w)
+
+    _BLENDED_VOICES_CACHE[voice_spec] = blended
+    logger.info("成功创建融合发音人 '%s' (融合 %d 种音色)", voice_spec, len(arrays))
+    return blended
 
 
 def resolve_model_and_voices(
@@ -553,31 +744,34 @@ class TTSEventHandler(AsyncEventHandler):
                 await self.write_event(AudioStop().event())
                 return True
 
-            # 1. 确定声音：优先使用 Wyoming 协议指定的 voice
+            # 1. 确定声音：优先使用 Wyoming 协议指定的 voice (支持单音色或多音色融合表达式)
             voice_name = self.default_voice_name
-            if synth.voice and synth.voice.name and synth.voice.name in self.voices:
-                voice_name = synth.voice.name
+            if synth.voice and synth.voice.name:
+                v_cand = synth.voice.name.strip()
+                if v_cand in self.voices or "+" in v_cand:
+                    voice_name = v_cand
 
             # 2. 智能确定目标合成语言：
             # 核心策略（内容优先）：
             # - 若文本包含中文汉字，必须使用 'zh'（中文 G2P 原生支持汉字与中英混排，而英文 G2P 会完全过滤丢失汉字）
             # - 若文本包含日文假名，必须使用 'ja'
-            # - 若文本为纯西文字符/数字：优先遵循客户端请求语言、声音前缀或兜底配置
+            # - 若文本为纯西文字符/英文：优先使用 'en'（即使用户使用 zf_* 发音人，也能以地道英文音标发音）
+            # - 若无法判定（纯数字或标点）：优先遵循客户端请求语言、声音前缀或兜底配置
             detected_lang = self.g2p_manager.detect_language_from_text(text)
 
             client_lang = None
             if synth.voice and synth.voice.language:
                 client_lang = synth.voice.language.split("-")[0].lower()
 
-            if detected_lang in ("zh", "ja"):
+            if detected_lang in ("zh", "ja", "en"):
                 lang = detected_lang
             elif client_lang and client_lang != "auto":
                 lang = client_lang
             elif voice_name:
                 prefix = voice_name[0].lower()
-                lang = VOICE_PREFIX_TO_LANG.get(prefix, detected_lang)
+                lang = VOICE_PREFIX_TO_LANG.get(prefix, self.default_language or "zh")
             else:
-                lang = detected_lang
+                lang = self.default_language or "zh"
 
             # 3. 确定语速：优先使用 Wyoming 事件中传递的 speed，否则使用全局默认配置
             req_speed = self.speed
@@ -642,11 +836,17 @@ class TTSEventHandler(AsyncEventHandler):
         t0 = time.perf_counter()
         target_lang = language or self.default_language or "zh"
 
-        # 保护性自适应：如果切片实际包含汉字，绝不能使用 en G2P，否则汉字会被完全丢弃！
-        if re.search(r"[\u4E00-\u9FFF]", text) and target_lang not in ("zh", "ja"):
+        # 每句切片自适应保护：
+        # - 若切片含有汉字，必须使用 zh（支持中英混排）
+        # - 若切片含有假名，必须使用 ja
+        # - 若切片纯为英文字母且无汉字假名，切换至 en 获得纯正英式/美式语调与音标
+        if re.search(r"[\u4E00-\u9FFF]", text):
             target_lang = "zh"
-        elif re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text) and target_lang != "ja":
+        elif re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text):
             target_lang = "ja"
+        elif re.search(r"[a-zA-Z]", text) and not re.search(r"[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]", text):
+            if target_lang in ("zh", "ja"):
+                target_lang = "en"
 
         g2p = self.g2p_manager.get_g2p(target_lang)
 
@@ -654,13 +854,9 @@ class TTSEventHandler(AsyncEventHandler):
         tokens = process_text_with_misaki(g2p, text, vocab=self.vocab)
         t_g2p = time.perf_counter() - t0
 
-        # 获取声音风格向量
+        # 获取声音风格向量（支持单音色与多音色加权融合）
         v_name = voice_name or self.default_voice_name
-        voice_data = self.voices.get(v_name)
-        if voice_data is None:
-            first_key = next(iter(self.voices))
-            logger.warning("未找到声音 '%s'，自动回退至 '%s'", v_name, first_key)
-            voice_data = self.voices[first_key]
+        voice_data = get_or_blend_voice(self.voices, v_name)
 
         # 提取当前 token 长度适配的 style 向量
         token_len = tokens.shape[1]
@@ -833,7 +1029,7 @@ def main(
 
     all_voice_names = list(voices.keys())
     selected_voice = voice_name
-    if not selected_voice or selected_voice not in voices:
+    if not selected_voice or (selected_voice not in voices and "+" not in selected_voice):
         # 优先默认推选中文优质音色（zf_* / zm_*），其次英文音色（af_* / am_*），若无则取首个
         preferred_voices = (
             [v for v in all_voice_names if v.startswith("zf_") or v.startswith("zm_")] +

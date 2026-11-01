@@ -13,10 +13,16 @@ Wyoming 协议 + OpenVINO 推理引擎：在 Intel 独立显卡（Arc）、核�
   - **STT (Whisper)**：直接指定 Optimum/OpenVINO 导出的 Whisper 模型目录。
 - **极简命令行体验（统一使用 `--model-dir`）**：
   - STT 和 TTS 均仅需传入 `--model-dir` 目录路径，脚本自动加载模型结构、权重及全部可用发音人。
+- **智能分句流式即时发声（借鉴 Kokoro-FastAPI 分词优化）**：
+  - 缩写词与数字保护：保护 `Dr.`、`Mr.`、`etc.`、`e.g.` 与浮点数（如 `3.14`），绝不生硬断句。
+  - 保留完整声学标点（`。！？!?`），使合成语音具备自然顿挫与语调起伏。
+  - Wyoming 流式首句秒级出声，长文本合成告别十几秒等待。
+- **发音人多音色线性加权融合（Voice Blending）**：
+  - 借鉴 Kokoro-FastAPI 声音融合语法，支持 `zf_xiaobei(0.7)+af_heart(0.3)`、`af_bella(2)+af_sky(1)` 或 `zf_xiaobei+af_heart`，自动归一化权重并线性组合风格向量。
 - **全自动多语言与协议动态指定**：
   - 命令行 `--language` 默认为 `auto`（完全可以不传）。
   - **STT**：优先遵循 Home Assistant 请求中指定的语言；若未指定，由 Whisper 神经网络原生自动听声辨语（支持中、英、日等 90+ 种语言）。
-  - **TTS**：优先遵循 Home Assistant 选择的发音人与语言；自动根据声音前缀（如 `zf_` -> 中文、`jf_` -> 日文、`af_` -> 英文）或文本内容（平假名/片假名/汉字/字母）智能匹配最佳 G2P 引擎。
+  - **TTS**：优先遵循 Home Assistant 选择的发音人与语言；自动根据声音前缀（如 `zf_` -> 中文、`jf_` -> 日文、`af_` -> 英文）或文本内容（平假名/片假名/汉字/字母）智能匹配最佳 G2P 引擎；中英混排时通过 `en_callable` 回调与 `EspeakFallback` 兜底，纯英文分句自动切换原生英文音标。
 - **Intel 硬件加速**：
   - 支持 `GPU`（Intel Arc 独显 / 核显）、`CPU`、`AUTO` 与 `MULTI:CPU,GPU` 混合推理。
 
@@ -105,6 +111,22 @@ python wyoming-tts.py \
 > [!TIP]
 > **语速推荐**：Kokoro 默认语速 `1.0` 在朗读中文/日文时稍偏快。启动时添加 `--speed 0.85`（或 `0.8`）能够获得最自然悠扬、清晰自然的播报体验！
 > **设备推荐**：由于 Kokoro 模型中算子的特性，TTS 推荐使用 `CPU` 设备，具有最佳兼容性与极佳的吞吐表现。
+
+### 3. 本地快速测试与生成 WAV (`test_tts.py`)
+
+无需连接 Home Assistant，可直接在本地测试发音、多音色融合并生成通用 WAV 音频：
+
+```bash
+# 中文基础测试
+python test_tts.py "我来测试一下语音合成的效果。" --model-dir /path/to/Kokoro-82M-FP16-OpenVINO -o test.wav
+
+# 多音色融合测试（按 7:3 混合中文与英文音色）
+python test_tts.py "今天天气真好，我们来测试 OpenVINO 语音合成。" \
+    --model-dir /path/to/Kokoro-82M-FP16-OpenVINO \
+    -v "zf_xiaobei(0.7)+af_heart(0.3)" \
+    --speed 0.85 \
+    -o blend.wav
+```
 
 ---
 

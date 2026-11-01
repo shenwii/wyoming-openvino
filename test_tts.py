@@ -31,6 +31,7 @@ _spec.loader.exec_module(_mod)
 MultiLangG2P = _mod.MultiLangG2P
 process_text_with_misaki = _mod.process_text_with_misaki
 resolve_model_and_voices = _mod.resolve_model_and_voices
+get_or_blend_voice = _mod.get_or_blend_voice
 
 app = typer.Typer(help="Kokoro OpenVINO TTS 独立测试与 WAV 生成工具")
 
@@ -59,7 +60,7 @@ def main(
         None,
         "--voice-name",
         "-v",
-        help="发音人名称（如 zf_xiaobei, af_heart, jf_teio 等；不填则自动推选）",
+        help="发音人名称或多音色融合表达式（如 zf_xiaobei, af_heart, zf_xiaobei(0.7)+af_heart(0.3)；不填则自动推选）",
     ),
     language: Optional[str] = typer.Option(
         "auto",
@@ -92,13 +93,14 @@ def main(
     model_file, voices, vocab = resolve_model_and_voices(model_dir=model_dir)
 
     all_voices = list(voices.keys())
-    if not voice_name or voice_name not in voices:
+    if not voice_name:
         preferred_voices = (
             [v for v in all_voices if v.startswith("zf_") or v.startswith("zm_")] +
             [v for v in all_voices if v.startswith("af_") or v.startswith("am_")]
         )
         voice_name = preferred_voices[0] if preferred_voices else all_voices[0]
 
+    voice_data = get_or_blend_voice(voices, voice_name)
     print(f"🎙️  使用声音: {voice_name}")
 
     # 2. 编译模型
@@ -129,15 +131,17 @@ def main(
     print(f"✂️  文本已拆分为 {len(chunks)} 个自然句子")
 
     all_pcm = bytearray()
-    voice_data = voices[voice_name]
     speed_array = np.array([speed], dtype=np.float32)
 
     for i, chunk_text in enumerate(chunks, 1):
         chunk_lang = target_lang
-        if re.search(r"[\u4E00-\u9FFF]", chunk_text) and chunk_lang not in ("zh", "ja"):
+        if re.search(r"[\u4E00-\u9FFF]", chunk_text):
             chunk_lang = "zh"
-        elif re.search(r"[\u3040-\u309F\u30A0-\u30FF]", chunk_text) and chunk_lang != "ja":
+        elif re.search(r"[\u3040-\u309F\u30A0-\u30FF]", chunk_text):
             chunk_lang = "ja"
+        elif re.search(r"[a-zA-Z]", chunk_text) and not re.search(r"[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]", chunk_text):
+            if chunk_lang in ("zh", "ja"):
+                chunk_lang = "en"
 
         chunk_g2p = g2p_manager.get_g2p(chunk_lang)
         tokens = process_text_with_misaki(chunk_g2p, chunk_text, vocab=vocab)
