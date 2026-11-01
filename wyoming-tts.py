@@ -58,18 +58,23 @@ app = typer.Typer(help="Wyoming TTS 服务 - 基于 OpenVINO 的多语言 Kokoro
 
 
 # ===========================================================================
-# Kokoro 默认标准词汇表与语言映射定义
+# Kokoro 默认标准词汇表与语言映射定义 (178 Tokens 官方完全对齐)
 # ===========================================================================
-_PAD = "$"
-_PUNCTUATION = ';:,.!?¡¿—…"«»"" ()'
-_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-_LETTERS_IPA = (
-    "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴ"
-    "øɵɸθœɶʘɹɺɾɻʀʁɽʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃ"
-    "ˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̈̃ˡ̩"
-)
-_DEFAULT_SYMBOLS = [_PAD] + list(_PUNCTUATION) + list(_LETTERS) + list(_LETTERS_IPA)
-DEFAULT_VOCAB: Dict[str, int] = {s: i for i, s in enumerate(_DEFAULT_SYMBOLS)}
+_DEFAULT_VOCAB_SYMBOLS = [
+    "$", ";", ":", ",", ".", "!", "?", "—", "…", "“", "”", "«", "»", "   ", "  ", " ",
+    "¡", "¿", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N",
+    "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n",
+    "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+    "ɑ", "ɒ", "æ", "ɓ", "ɔ", "ɕ", "ç", "ɗ", "ɘ", "ə", "ɚ", "ɛ", "ɜ", "ɟ", "ɠ", "ɢ",
+    "ɣ", "ɦ", "ɧ", "ɨ", "ɪ", "ɫ", "ɬ", "ɭ", "ɮ", "ɯ", "ɰ", "ɱ", "ɲ", "ɳ", "ɵ", "ɶ",
+    "ɸ", "ɹ", "ɺ", "ɻ", "ɼ", "ɽ", "ɾ", "ɿ", "ʀ", "ʁ", "ʂ", "ʃ", "ʄ", "ʅ", "ʆ", "ʇ",
+    "ʈ", "ʉ", "ʊ", "ʋ", "ʌ", "ʍ", "ʎ", "ʏ", "ʐ", "ʑ", "ʒ", "ʓ", "ʔ", "ʕ", "ʖ", "ʗ",
+    "ʘ", "ʙ", "ʚ", "ʛ", "ʜ", "ʝ", "ʞ", "ʟ", "ʠ", "ʡ", "ʢ", "ʣ", "ʤ", "ʥ", "ʦ", "ʧ",
+    "ʩ", "ʪ", "ʫ", "ʬ", "ʭ", "ʮ", "ʯ", "ʰ", "ʱ", "ʲ", "ʳ", "ʴ", "ʵ", "ʶ", "ʷ", "ʸ",
+    "ʹ", "ʺ", "ʻ", "ʼ", "ʽ", "ʾ", "ʿ", "ˀ", "ˁ", "˂", "˃", "˄"
+]
+DEFAULT_VOCAB: Dict[str, int] = {s: i for i, s in enumerate(_DEFAULT_VOCAB_SYMBOLS)}
 
 # 发音人前缀对应语言代码（与 Kokoro-FastAPI 严格一致）
 VOICE_PREFIX_TO_LANG: Dict[str, str] = {
@@ -150,17 +155,18 @@ def split_text_into_streaming_chunks(text: str, max_chunk_chars: int = 35) -> Li
     if not text:
         return []
 
-    # 1. 占位符保护浮点数与英文缩写中的句点
-    protected = re.sub(r"(\d)\.(\d)", r"\g<1>\u200b\g<2>", text)
-    protected = re.sub(rf"\b({ABBREVIATIONS})\.", r"\g<1>\u200b", protected, flags=re.IGNORECASE)
-    protected = re.sub(r"\b([A-Z])\.", r"\g<1>\u200b", protected)
+    ZWS = "\u200b"
+    # 1. 占位符保护浮点数与英文缩写中的句点 (注意: 严禁在原始正则字符串中使用 \\u，防止 Python 3.12+ 报 bad escape \\u 异常)
+    protected = re.sub(r"(\d)\.(\d)", rf"\g<1>{ZWS}\g<2>", text)
+    protected = re.sub(rf"\b({ABBREVIATIONS})\.", rf"\g<1>{ZWS}", protected, flags=re.IGNORECASE)
+    protected = re.sub(r"\b([A-Z])\.", rf"\g<1>{ZWS}", protected)
 
     # 2. 匹配主句结束符：中日句号问叹标点 [。！？!?] 或 英文句号后接空白/换行
     sentence_pattern = r"([^。！？!?\r\n]+(?:[。！？!?]+|\.(?=\s|$))?)"
     raw_sentences = [s.strip() for s in re.findall(sentence_pattern, protected) if s.strip()]
 
     # 3. 恢复占位符
-    sentences = [s.replace("\u200b", ".") for s in raw_sentences]
+    sentences = [s.replace(ZWS, ".") for s in raw_sentences]
     if not sentences:
         sentences = [text]
 
@@ -177,8 +183,29 @@ def split_text_into_streaming_chunks(text: str, max_chunk_chars: int = 35) -> Li
             chunks.append(sentence)
             continue
 
+        # 防止长无标点句子过长导致超显存/超时，对单子句进行词/字符级安全截断
+        safe_clauses: List[str] = []
+        for c in raw_clauses:
+            if len(c) > max_chunk_chars:
+                if " " in c:
+                    words = c.split(" ")
+                    buf = ""
+                    for w in words:
+                        if len(buf) + len(w) + 1 > max_chunk_chars and buf:
+                            safe_clauses.append(buf)
+                            buf = w
+                        else:
+                            buf = (buf + " " + w).strip()
+                    if buf:
+                        safe_clauses.append(buf)
+                else:
+                    for k in range(0, len(c), max_chunk_chars):
+                        safe_clauses.append(c[k : k + max_chunk_chars])
+            else:
+                safe_clauses.append(c)
+
         current_chunk = ""
-        for clause in raw_clauses:
+        for clause in safe_clauses:
             if len(current_chunk) + len(clause) > max_chunk_chars and current_chunk:
                 chunks.append(current_chunk)
                 current_chunk = clause
@@ -264,7 +291,16 @@ class MultiLangG2P:
         return engine, lang_code
 
     def _create_g2p(self, lang_code: str):
-        """按语言代码初始化 misaki G2P 实例。"""
+        """按语言代码初始化 G2P 实例，优先原生 KPipeline，回退 misaki。"""
+        # 1. 尝试使用 Kokoro 原生 KPipeline (若用户环境已安装 kokoro 库)
+        try:
+            from kokoro import KPipeline
+            logger.info("使用 Kokoro 原生 KPipeline 前端 (lang_code=%s, model=False)", lang_code)
+            return KPipeline(lang_code=lang_code, model=False)
+        except Exception:
+            pass
+
+        # 2. 回退到 misaki 多语言 G2P 前端
         try:
             if lang_code in ("a", "b"):
                 from misaki import en
@@ -362,8 +398,19 @@ class MultiLangG2P:
             logger.warning("G2P 转换异常 ('%s'): %s，尝试降级纯文本映射", text, e)
             res = text
 
-        # 从 G2P 结果中解析出音素字符串
-        if isinstance(res, tuple):
+        # 从 G2P / KPipeline 结果中解析出音素字符串
+        from inspect import isgenerator
+        if isgenerator(res) or hasattr(res, "__next__"):
+            phoneme_parts = []
+            for item in res:
+                if hasattr(item, "phonemes") and item.phonemes:
+                    phoneme_parts.append(str(item.phonemes))
+                elif isinstance(item, tuple) and len(item) >= 2 and item[1]:
+                    phoneme_parts.append(str(item[1]))
+                elif isinstance(item, str):
+                    phoneme_parts.append(item)
+            ps = "".join(phoneme_parts)
+        elif isinstance(res, tuple):
             ps = str(res[0])
         elif isinstance(res, str):
             ps = res
@@ -596,16 +643,22 @@ def resolve_model_and_voices(
 
     # 2. 读取 config.json 提取词汇表
     vocab: Optional[Dict[str, int]] = None
-    config_file = model_root / "config.json"
-    if config_file.exists():
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                if "vocab" in cfg:
-                    vocab = cfg["vocab"]
-                    logger.info("已成功加载 config.json 词汇表 (包含 %d 个 tokens)", len(vocab))
-        except Exception as e:
-            logger.warning("解析 config.json 异常: %s", e)
+    config_candidates = [
+        model_root / "config.json",
+        model_root.parent / "config.json",
+        Path("./config.json"),
+    ]
+    for c_path in config_candidates:
+        if c_path.is_file():
+            try:
+                with open(c_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    if "vocab" in cfg:
+                        vocab = cfg["vocab"]
+                        logger.info("已成功加载 %s 词汇表 (包含 %d 个 tokens)", c_path, len(vocab))
+                        break
+            except Exception as e:
+                logger.warning("解析 %s 异常: %s", c_path, e)
 
     # 3. 扫描 voices 目录或打包文件
     voices: Dict[str, np.ndarray] = {}
@@ -784,32 +837,58 @@ class TTSEventHandler(AsyncEventHandler):
                 await self.write_event(AudioStop().event())
                 return True
 
-            # (1) 确定发音人
-            voice_name = self.default_voice_name
+            # (1) 检查客户端是否显式传入了 voice 与 language
+            explicit_voice = None
             if synth.voice and synth.voice.name:
                 cand = synth.voice.name.strip()
                 if cand in self.voices or "+" in cand:
-                    voice_name = cand
+                    explicit_voice = cand
 
-            # (2) 确定合成语言（严格遵循用户指令与文本优先级）
-            # 策略：
-            # A. 若 HA 在 Wyoming 请求中指定了明确语言（如 voice.language='ja'），以指定为最高准则；
-            # B. 其次检查发音人前缀（如 jf_* 为日语音色，zf_* 为中文音色）；
-            # C. 再次分析待读文本内容（有假名必定是日语，有汉字必定是中文，有字母必定是英文）；
-            # D. 最后回退到默认语言配置。
             client_lang = None
             if synth.voice and synth.voice.language:
-                client_lang = synth.voice.language.split("-")[0].lower()
+                cand_lang = synth.voice.language.split("-")[0].lower()
+                if cand_lang not in ("auto", "none", ""):
+                    client_lang = cand_lang
 
+            # (2) 智能确定合成语言（对齐 Kokoro-FastAPI 多语言体系）
+            # 优先级体系：
+            # A. 文本包含日文假名 -> 必定为 ja (日语)！彻底防止日文因默认音色被误判为中文
+            # B. 客户端显式指定了语言 (如 language='ja' 或 'en') -> 以客户端为准
+            # C. 客户端显式指定了发音人 (如 jf_alpha, af_heart) -> 从发音人前缀推导语言
+            # D. 文本内容特征探测 (含汉字且无假名 -> zh, 纯西文字母 -> en)
+            # E. 回退到服务配置的默认语言
             detected_lang = detect_language(text, default_lang=self.default_language)
 
-            if client_lang and client_lang not in ("auto", ""):
+            if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text):
+                target_lang = "ja"
+            elif client_lang:
                 target_lang = client_lang
-            elif voice_name:
-                prefix = voice_name[0].lower()
-                target_lang = VOICE_PREFIX_TO_LANG.get(prefix, detected_lang)
+            elif explicit_voice:
+                prefix = explicit_voice[0].lower()
+                # 若显式选了中文音色但输入纯英文，自动修正为英文处理
+                if prefix == "z" and re.search(r"^[a-zA-Z0-9\s\.,!\?'-]+$", text.strip()):
+                    target_lang = "en"
+                else:
+                    target_lang = VOICE_PREFIX_TO_LANG.get(prefix, detected_lang)
             else:
                 target_lang = detected_lang
+
+            # (3) 智能匹配/推选发音人：
+            # 若客户端显式指定了发音人，直接使用；
+            # 若客户端未显式指定，且检测出的目标语言与默认音色不匹配（例如目标是 ja，默认音色是 zf_*），
+            # 自动从可用音色库中推选该语言的最佳发音人（如 jf_alpha）！
+            if explicit_voice:
+                voice_name = explicit_voice
+            else:
+                target_code = LANG_CODE_MAP.get(target_lang, target_lang)
+                matching_voices = [
+                    v for v in self.voices.keys()
+                    if v.startswith(f"{target_code}f_") or v.startswith(f"{target_code}m_")
+                ]
+                if matching_voices:
+                    voice_name = matching_voices[0]
+                else:
+                    voice_name = self.default_voice_name
 
             # (3) 确定语速倍率
             req_speed = self.speed

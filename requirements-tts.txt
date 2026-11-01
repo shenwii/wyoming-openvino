@@ -11,8 +11,9 @@ openvino>=2024.0
 # PyTorch（用于解析 Kokoro 官方 .pt 发音人音色权重）
 torch
 
-# Kokoro TTS 基础文本前端
-misaki>=0.4.0
+# Kokoro TTS 基础文本前端与多语言支持
+kokoro>=0.8.4
+misaki[en,ja,zh]>=0.4.0
 
 # 音频与科学计算
 numpy>=1.24.0

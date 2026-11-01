@@ -106,31 +106,42 @@ def main(
     model_file, voices, vocab = resolve_model_and_voices(model_dir=model_dir)
 
     all_voices = list(voices.keys())
-    if not voice_name:
-        preferred_voices = (
-            [v for v in all_voices if v.startswith("zf_") or v.startswith("zm_")] +
-            [v for v in all_voices if v.startswith("jf_") or v.startswith("jm_")] +
-            [v for v in all_voices if v.startswith("af_") or v.startswith("am_")]
-        )
-        voice_name = preferred_voices[0] if preferred_voices else all_voices[0]
 
-    voice_data = get_or_blend_voice(voices, voice_name)
-    print(f"🎙️  使用声音: {voice_name}")
-
-    # 2. 编译 OpenVINO 模型
-    engine = KokoroEngine(model_file=model_file, device=device, threads=threads)
-
-    # 3. 确定语言逻辑（假名必定为 ja；有显式指定或音色指定以指定为准）
+    # 2. 确定语言逻辑（假名必定为 ja；有显式指定或音色指定以指定为准）
     detected = detect_language(text, default_lang="zh")
-    if language and language != "auto":
+    if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text):
+        target_lang = "ja"
+    elif language and language != "auto":
         target_lang = language
     elif voice_name:
         prefix = voice_name[0].lower()
-        target_lang = VOICE_PREFIX_TO_LANG.get(prefix, detected)
+        if prefix == "z" and re.search(r"^[a-zA-Z0-9\s\.,!\?'-]+$", text.strip()):
+            target_lang = "en"
+        else:
+            target_lang = VOICE_PREFIX_TO_LANG.get(prefix, detected)
     else:
         target_lang = detected
 
+    # 3. 智能推选或加载发音人
+    if not voice_name:
+        target_code = LANG_CODE_MAP.get(target_lang, "z")
+        matched = [v for v in all_voices if v.startswith(f"{target_code}f_") or v.startswith(f"{target_code}m_")]
+        if matched:
+            voice_name = matched[0]
+        else:
+            preferred_voices = (
+                [v for v in all_voices if v.startswith("zf_") or v.startswith("zm_")] +
+                [v for v in all_voices if v.startswith("jf_") or v.startswith("jm_")] +
+                [v for v in all_voices if v.startswith("af_") or v.startswith("am_")]
+            )
+            voice_name = preferred_voices[0] if preferred_voices else all_voices[0]
+
+    voice_data = get_or_blend_voice(voices, voice_name)
+    print(f"🎙️  使用声音: {voice_name}")
     print(f"🌐 确定语言: {target_lang} (文本检测: {detected})")
+
+    # 4. 编译 OpenVINO 模型
+    engine = KokoroEngine(model_file=model_file, device=device, threads=threads)
 
     # 4. 初始化 G2P 管理器
     g2p_manager = MultiLangG2P(
