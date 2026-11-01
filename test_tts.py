@@ -86,6 +86,12 @@ def main(
         "-s",
         help="语速倍率（默认 1.0；推荐设为 0.8~0.85 获得更从容自然的中文/日文听感，>1.0 加速，<1.0 减速）",
     ),
+    threads: Optional[int] = typer.Option(
+        None,
+        "--threads",
+        "-t",
+        help="OpenVINO CPU 推理线程数（默认 None 自适应优化）",
+    ),
 ):
     print(f"📖 待合成文本: {text}")
 
@@ -104,13 +110,11 @@ def main(
     print(f"🎙️  使用声音: {voice_name}")
 
     # 2. 编译模型
-    import os
     core = ov.Core()
     model = core.read_model(str(model_file))
-    ov_config = {
-        "PERFORMANCE_HINT": "LATENCY",
-        "INFERENCE_NUM_THREADS": str(min(os.cpu_count() or 4, 8)),
-    }
+    ov_config = {"PERFORMANCE_HINT": "LATENCY"}
+    if threads is not None and threads > 0:
+        ov_config["INFERENCE_NUM_THREADS"] = str(threads)
     compiled_model = core.compile_model(model, device, config=ov_config)
 
     # 3. 初始化 G2P 并转换音素

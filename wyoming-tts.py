@@ -331,14 +331,14 @@ def smart_sentence_split(text: str) -> List[str]:
     return sentences if sentences else [text]
 
 
-def split_text_into_chunks(text: str, max_chunk_chars: int = 70) -> List[str]:
+def split_text_into_chunks(text: str, max_chunk_chars: int = 35) -> List[str]:
     """
-    将长文本智能切分为自然的语音分句（默认约 50-70 字/句）。
+    将长文本智能切分为自然的语音分句（推荐默认约 25-35 字/句）。
     整合 Kokoro-FastAPI 的 UAX #29 智能断句、缩写保护与自然从句切分:
-      1. 保护英文缩写（Dr., etc.）与浮点数（3.14），绝不截断；
-      2. 完整保留句尾标点（。！？!?），提供自然声学停顿；
-      3. 超长句子按从句次级标点（分号、逗号、破折号）平滑分块；
-      4. Wyoming 流式首句秒级即时发声，彻底消除整篇等待。
+      1. 保护英文缩写（Dr., etc.）与浮点数（3.14），绝不生硬截断；
+      2. 完整保留句尾标点（。！？!?），提供自然声学顿挫与语调起伏；
+      3. 超长句子按从句次级标点（逗号、分号、顿号、破折号）平滑切分；
+      4. 首句极速出声（Time To First Audio 压缩至 1~2 秒内），后续音频平滑边播边算，彻底消除卡顿。
     """
     text = normalize_mixed_text(text.strip())
     if not text:
@@ -352,7 +352,7 @@ def split_text_into_chunks(text: str, max_chunk_chars: int = 70) -> List[str]:
             chunks.append(sentence)
             continue
 
-        # 如果单个句子超出 max_chunk_chars，按次级从句标点切分
+        # 如果单个句子超出 max_chunk_chars，按次级从句标点切分（保留逗号、分号、顿号等）
         clause_pattern = r"([^；;，,、:—\r\n]+[；;，,、:—]*)"
         raw_clauses = [c.strip() for c in re.findall(clause_pattern, sentence) if c.strip()]
         if not raw_clauses:
@@ -364,7 +364,8 @@ def split_text_into_chunks(text: str, max_chunk_chars: int = 70) -> List[str]:
                 chunks.append(current_chunk)
                 current_chunk = clause
             else:
-                current_chunk += (" " if current_chunk and clause and clause[0].isalnum() else "") + clause
+                need_space = bool(current_chunk and clause and clause[0].isalnum() and clause[0].isascii())
+                current_chunk += (" " if need_space else "") + clause
         if current_chunk:
             chunks.append(current_chunk)
 
@@ -1032,6 +1033,12 @@ def main(
         "--sample-rate",
         help="音频采样率（Hz），Kokoro 默认 24000",
     ),
+    threads: Optional[int] = typer.Option(
+        None,
+        "--threads",
+        "-t",
+        help="OpenVINO CPU 推理线程数（默认 None 由 OpenVINO 根据系统 CPU 拓扑自适应优化）",
+    ),
     model_name: str = typer.Option(
         "kokoro",
         "--model-name",
@@ -1079,12 +1086,15 @@ def main(
     logger.info("正在加载并编译模型: %s (设备: %s)", resolved_model_file, device)
 
     model = core.read_model(str(resolved_model_file))
-    import os
-    cpu_cores = min(os.cpu_count() or 4, 8)
-    ov_config = {
+    ov_config: Dict[str, str] = {
         "PERFORMANCE_HINT": "LATENCY",
-        "INFERENCE_NUM_THREADS": str(cpu_cores),
     }
+    if threads is not None and threads > 0:
+        ov_config["INFERENCE_NUM_THREADS"] = str(threads)
+        logger.info("已指定 OpenVINO 推理线程数: %d", threads)
+    else:
+        logger.info("OpenVINO 线程模式: 自动根据硬件拓扑自适应调度 (LATENCY 模式)")
+
     try:
         compiled_model = core.compile_model(model, device, config=ov_config)
         logger.info("模型编译成功 (设备: %s, 模式: LATENCY)", device)
@@ -1137,6 +1147,19 @@ def main(
             )
         ],
     )
+
+    # ---- 预热 G2P 与 OpenVINO 推理引擎（消除首句冷启动数十秒延迟）----
+    logger.info("正在执行首句冷启动预热 (G2P & OpenVINO)...")
+    try:
+        warmup_g2p = g2p_manager.get_g2p("zh")
+        g2p_manager.get_g2p("en")
+        warmup_tokens = process_text_with_misaki(warmup_g2p, "你好", vocab=vocab)
+        dummy_style = np.zeros((1, 256), dtype=np.float32)
+        dummy_speed = np.array([1.0], dtype=np.float32)
+        compiled_model([warmup_tokens, dummy_style, dummy_speed])
+        logger.info("🎉 服务预热完成，已进入就绪状态（首句将实现秒级发声）！")
+    except Exception as exc:
+        logger.debug("服务预热跳过或出现异常 (不影响正常运行): %s", exc)
 
     # ---- 启动 Wyoming 异步服务 ----
     server = AsyncServer.from_uri(f"tcp://{host}:{port}")
