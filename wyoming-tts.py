@@ -398,6 +398,7 @@ def process_text_with_misaki(
         logger.warning("音素 '%s' 中的字符均未命中词汇表！", phoneme_str)
         matched_ids = [0]
 
+    has_zh_chars = bool(re.search(r"[\u4E00-\u9FFF]", text))
     if has_zh_chars and len(matched_ids) < 10 and len(text) > 5:
         logger.warning(
             "⚠️ 中文句子 token 匹配数异常偏低 (%d 字 -> 仅 %d tokens)，请检查当前模型目录下的 config.json 词汇表配置！",
