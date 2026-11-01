@@ -193,7 +193,8 @@ def test_local_direct(
         for model in engine.classifiers.values():
             score = 0.0
             if model.is_end_to_end:
-                score = model.predict(chunk_audio)
+                float_audio = chunk_audio.astype(np.float32).reshape(1, -1)
+                score = model.predict(float_audio)
             else:
                 if len(embedding_history) >= model.context_len:
                     emb_window = list(embedding_history)[-model.context_len :]

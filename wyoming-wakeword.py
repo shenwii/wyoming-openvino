@@ -469,11 +469,12 @@ class WakeWordEngine:
             else:
                 raise FileNotFoundError(f"未找到唤醒词模型文件: {m_cfg.model_path}")
 
-        # 分析模型输入形状
+        # 分析模型输入形状与类型
         temp_model = self.core.read_model(str(path))
-        inp_shape = temp_model.inputs[0].get_partial_shape()
+        inp = temp_model.inputs[0]
+        inp_shape = inp.get_partial_shape()
 
-        # 判断是否为端到端模型 (直接输入音频或频谱) 还是基于 96 维 Embedding
+        # 判断模型架构类型
         is_e2e = False
         context_len = DEFAULT_CONTEXT_LEN
         static_shape = None
@@ -484,10 +485,26 @@ class WakeWordEngine:
                 context_len = inp_shape[1].get_length()
             static_shape = [1, context_len, EMBEDDING_DIM]
             logger.info("唤醒词 '%s' (基于Embedding, 窗口=%d帧)", m_cfg.name, context_len)
-        else:
-            # 端到端或者其它结构
+        elif len(inp_shape) == 3 and inp_shape[-1] in (32, 40):
+            # 这是 microWakeWord 或 2D 梅尔频谱模型 (例如 [1, 98, 32] 或 [1, 98, 40])
+            raise ValueError(
+                f"唤醒词模型 '{m_cfg.name}' ({path}) 的输入形状为 {inp_shape}，"
+                f"属于梅尔频谱特征模型（如 microWakeWord）。\n"
+                f"当前服务是基于 openWakeWord 架构设计的，分类器模型输入必须为 [1, 16, 96]（语音嵌入向量）。\n"
+                f"请使用 openWakeWord 官方分类器模型（如 hey_jarvis_v0.1.onnx、alexa_v0.1.onnx 等），"
+                f"或移除该非 openWakeWord 模型。"
+            )
+        elif len(inp_shape) == 2:
+            # 端到端原始波形输入模型 [1, SAMPLES]
             is_e2e = True
-            logger.info("唤醒词 '%s' 识别为端到端模型结构", m_cfg.name)
+            e2e_samples = inp_shape[1].get_length() if inp_shape[1].is_static else CHUNK_SAMPLES
+            static_shape = [1, e2e_samples]
+            logger.info("唤醒词 '%s' 识别为端到端音频模型结构 (输入长度: %d 采样点)", m_cfg.name, e2e_samples)
+        else:
+            raise ValueError(
+                f"不支持的唤醒词模型输入形状: {inp_shape} (模型文件: {path})。\n"
+                f"支持的类型: openWakeWord 分类器 [1, N, 96] 或 端到端音频模型 [1, N]。"
+            )
 
         compiled, actual_dev = self.runner.compile_model_safe(
             model_path=path,
@@ -584,7 +601,11 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                 audio_samples = np.frombuffer(chunk_slice, dtype=np.int16)
 
                 # 处理特征提取流水线
-                detected_model = await self._process_frame(audio_samples)
+                detected_model = None
+                try:
+                    detected_model = await self._process_frame(audio_samples)
+                except Exception as exc:
+                    logger.error("音频帧处理或模型推理失败: %s", exc, exc_info=True)
                 if detected_model:
                     # 触发唤醒事件，告知客户端
                     logger.info(
@@ -643,8 +664,9 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
         for model in self.active_models:
             score = 0.0
             if model.is_end_to_end:
-                # 端到端模型直接送入音频数据
-                score = model.predict(audio_samples)
+                # 端到端原始音频模型: 确保形状为 [1, N] 且类型为 float32
+                float_audio = audio_samples.astype(np.float32).reshape(1, -1)
+                score = model.predict(float_audio)
             else:
                 # 基于 Embedding 的分类器
                 if len(self.embedding_history) >= model.context_len:
@@ -832,8 +854,8 @@ def main(
         logger.info("正在扫描目录下的模型文件: %s", model_dir)
         for ext in ("*.onnx", "*.tflite", "*.xml"):
             for file_p in model_dir.glob(ext):
-                # 排除基础特征模型
-                if file_p.name in ["melspectrogram.onnx", "embedding_model.onnx"]:
+                # 排除基础特征提取模型 (如 melspectrogram / embedding_model)
+                if file_p.stem.startswith("melspectrogram") or file_p.stem.startswith("embedding_model"):
                     continue
                 clean_name = file_p.stem.split("_v")[0] if "_v" in file_p.stem else file_p.stem
                 if not any(m.name == clean_name for m in server_config.models):
