@@ -1,10 +1,12 @@
 # ===========================================================================
-# Wyoming OpenVINO - 全量依赖清单 (STT + TTS)
+# Wyoming OpenVINO - 全量依赖清单 (STT + TTS + Wake Word)
 # ===========================================================================
 # 若只需运行单独服务，请使用专门的依赖文件:
-#   - STT 服务: pip install -r requirements-stt.txt
-#   - TTS 服务: pip install -r requirements-tts.txt
+#   - STT 语音识别服务: pip install -r requirements-stt.txt
+#   - TTS 语音合成服务: pip install -r requirements-tts.txt
+#   - Wake Word 唤醒词服务: pip install -r requirements-wakeword.txt
 # ===========================================================================
 
 -r requirements-stt.txt
 -r requirements-tts.txt
+-r requirements-wakeword.txt
