@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
-TTS 快速测试与 WAV 音频生成脚本
-=============================
+TTS 快速测试与 WAV 音频生成脚本 (Kokoro OpenVINO 极速版)
+======================================================
 无需连接 Home Assistant，直接在本地测试 Kokoro TTS 合成并将音频保存为标准的 .wav 文件。
 生成的 WAV 文件可以在任何浏览器、网页播放器或系统播放器中直接播放。
 
 使用示例:
-    python test_tts.py "我来测试下" --model-dir /models/Kokoro-82M-FP16-OpenVINO -o test.wav
-    python test_tts.py "Hello, this is a test." --model-dir /models/Kokoro-82M-FP16-OpenVINO -v af_heart -o en.wav
+    # 中文合成测试
+    python test_tts.py "今天天气真好，我们来测试 OpenVINO 语音合成服务的生成效果。" --model-dir ./Kokoro-82M-FP16-OpenVINO -o test_zh.wav
+
+    # 日文合成测试
+    python test_tts.py "こんにちは、今日はとても良い天気ですね。" --model-dir ./Kokoro-82M-FP16-OpenVINO -v jf_alpha -o test_ja.wav
+
+    # 英文合成测试
+    python test_tts.py "Hello, this is a fast text-to-speech test using OpenVINO." --model-dir ./Kokoro-82M-FP16-OpenVINO -v af_heart -o test_en.wav
 """
 
 import io
@@ -17,9 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import openvino as ov
 import typer
-
 import importlib.util
 
 # 动态加载同目录下的 wyoming-tts.py
@@ -29,9 +33,12 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
 MultiLangG2P = _mod.MultiLangG2P
-process_text_with_misaki = _mod.process_text_with_misaki
+KokoroEngine = _mod.KokoroEngine
+detect_language = _mod.detect_language
 resolve_model_and_voices = _mod.resolve_model_and_voices
 get_or_blend_voice = _mod.get_or_blend_voice
+split_text_into_streaming_chunks = _mod.split_text_into_streaming_chunks
+VOICE_PREFIX_TO_LANG = _mod.VOICE_PREFIX_TO_LANG
 
 app = typer.Typer(help="Kokoro OpenVINO TTS 独立测试与 WAV 生成工具")
 
@@ -60,13 +67,13 @@ def main(
         None,
         "--voice-name",
         "-v",
-        help="发音人名称或多音色融合表达式（如 zf_xiaobei, af_heart, zf_xiaobei(0.7)+af_heart(0.3)；不填则自动推选）",
+        help="发音人名称或多音色融合表达式（如 zf_xiaobei, jf_alpha, af_heart, zf_xiaobei(0.7)+af_heart(0.3)；不填则自动推选）",
     ),
     language: Optional[str] = typer.Option(
         "auto",
         "--language",
         "-l",
-        help="合成语言（auto / zh / en / ja 等）",
+        help="合成语言（auto / zh / ja / en / es / fr 等）",
     ),
     output: str = typer.Option(
         "output.wav",
@@ -81,10 +88,10 @@ def main(
         help="推理设备（默认 CPU，Kokoro 在 CPU 上极快且兼容性最佳）",
     ),
     speed: float = typer.Option(
-        1.0,
+        0.85,
         "--speed",
         "-s",
-        help="语速倍率（默认 1.0；推荐设为 0.8~0.85 获得更从容自然的中文/日文听感，>1.0 加速，<1.0 减速）",
+        help="语速倍率（默认 0.85；>1.0 加速，<1.0 减速）",
     ),
     threads: Optional[int] = typer.Option(
         None,
@@ -102,6 +109,7 @@ def main(
     if not voice_name:
         preferred_voices = (
             [v for v in all_voices if v.startswith("zf_") or v.startswith("zm_")] +
+            [v for v in all_voices if v.startswith("jf_") or v.startswith("jm_")] +
             [v for v in all_voices if v.startswith("af_") or v.startswith("am_")]
         )
         voice_name = preferred_voices[0] if preferred_voices else all_voices[0]
@@ -109,78 +117,51 @@ def main(
     voice_data = get_or_blend_voice(voices, voice_name)
     print(f"🎙️  使用声音: {voice_name}")
 
-    # 2. 编译模型
-    core = ov.Core()
-    model = core.read_model(str(model_file))
-    ov_config = {"PERFORMANCE_HINT": "LATENCY"}
-    if threads is not None and threads > 0:
-        ov_config["INFERENCE_NUM_THREADS"] = str(threads)
-    compiled_model = core.compile_model(model, device, config=ov_config)
+    # 2. 编译 OpenVINO 模型
+    engine = KokoroEngine(model_file=model_file, device=device, threads=threads)
 
-    # 3. 初始化 G2P 并转换音素
+    # 3. 确定语言逻辑（假名必定为 ja；有显式指定或音色指定以指定为准）
+    detected = detect_language(text, default_lang="zh")
+    if language and language != "auto":
+        target_lang = language
+    elif voice_name:
+        prefix = voice_name[0].lower()
+        target_lang = VOICE_PREFIX_TO_LANG.get(prefix, detected)
+    else:
+        target_lang = detected
+
+    print(f"🌐 确定语言: {target_lang} (文本检测: {detected})")
+
+    # 4. 初始化 G2P 管理器
     g2p_manager = MultiLangG2P(
-        fallback_language="zh" if language == "auto" else language,
+        fallback_language=target_lang,
         vocab=vocab,
     )
 
-    # 自动识别语言（若文本包含汉字，必须优先使用 zh）
-    target_lang = language
-    if not target_lang or target_lang == "auto":
-        target_lang = g2p_manager.detect_language_from_text(text)
-    elif re.search(r"[\u4E00-\u9FFF]", text) and target_lang not in ("zh", "ja"):
-        target_lang = "zh"
-
-    print(f"🌐 确定语言: {target_lang}")
-
-    # 4. 文本切句与分段推理
-    _split_func = getattr(_mod, "split_text_into_chunks", lambda t: [t])
-    chunks = _split_func(text)
-    print(f"✂️  文本已拆分为 {len(chunks)} 个自然句子")
+    # 5. 文本切句与流式生成
+    chunks = split_text_into_streaming_chunks(text)
+    print(f"✂️  文本已拆分为 {len(chunks)} 个流式语音从句")
 
     all_pcm = bytearray()
-    speed_array = np.array([speed], dtype=np.float32)
 
     for i, chunk_text in enumerate(chunks, 1):
+        # 分句语言精细判定
         chunk_lang = target_lang
-        if re.search(r"[\u4E00-\u9FFF]", chunk_text):
-            chunk_lang = "zh"
-        elif re.search(r"[\u3040-\u309F\u30A0-\u30FF]", chunk_text):
+        if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", chunk_text):
             chunk_lang = "ja"
-        elif re.search(r"[a-zA-Z]", chunk_text) and not re.search(r"[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]", chunk_text):
-            if chunk_lang in ("zh", "ja"):
-                chunk_lang = "en"
+        elif re.search(r"[\u4E00-\u9FFF]", chunk_text) and chunk_lang not in ("ja", "zh"):
+            chunk_lang = "zh"
+        elif re.search(r"^[a-zA-Z0-9\s\.,!\?'-]+$", chunk_text):
+            chunk_lang = "en"
 
-        chunk_g2p = g2p_manager.get_g2p(chunk_lang)
-        tokens = process_text_with_misaki(
-            chunk_g2p,
-            chunk_text,
-            vocab=vocab,
-        )
-        token_len = tokens.shape[1]
+        tokens = g2p_manager.text_to_tokens(chunk_text, chunk_lang)
+        if tokens.shape[1] <= 2:
+            continue
 
-        if voice_data.ndim == 2:
-            idx = min(token_len, len(voice_data) - 1)
-            style = voice_data[idx : idx + 1]
-        elif voice_data.ndim == 3:
-            idx = min(token_len, len(voice_data) - 1)
-            style = voice_data[idx]
-        elif voice_data.ndim == 1:
-            style = voice_data[np.newaxis, :]
-        else:
-            style = voice_data
-
-        if style.shape != (1, 256):
-            style = style.reshape(1, 256)
-        style = style.astype(np.float32)
-
-        output_ov = compiled_model([tokens, style, speed_array])
-        audio = output_ov[compiled_model.output(0)]
-        audio = np.squeeze(audio)
-
-        audio = np.clip(audio, -1.0, 1.0)
-        pcm_chunk = (audio * 32767).astype(np.int16).tobytes()
-        all_pcm.extend(pcm_chunk)
-        print(f"   [{i}/{len(chunks)}] 合成完成: {chunk_text}")
+        pcm_chunk = engine.synthesize_tokens(tokens, voice_data, speed=speed)
+        if pcm_chunk:
+            all_pcm.extend(pcm_chunk)
+            print(f"   [{i}/{len(chunks)}] 合成完成: {chunk_text} (tokens={tokens.shape[1]})")
 
     # 6. 转 16-bit PCM 并打包为 WAV 文件
     wav_bytes = pcm_to_wav(bytes(all_pcm), sample_rate=24000)
