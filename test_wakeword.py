@@ -162,9 +162,9 @@ def test_local_direct(
     audio_samples = read_wav_16k_mono(wav_path)
     raw_bytes = audio_samples.tobytes()
 
-    from collections import deque
-    melspec_history = deque(maxlen=MEL_HISTORY_FRAMES)
-    embedding_history = deque(maxlen=64)
+    # 预先使用静音 (全零) 填充滑窗缓冲区，确保短音频 (如 1-2 秒) 也能无延迟检测
+    melspec_buffer = np.zeros((MEL_HISTORY_FRAMES, 32), dtype=np.float32)
+    embedding_buffer = np.zeros((DEFAULT_CONTEXT_LEN, EMBEDDING_DIM), dtype=np.float32)
 
     print(f"\n开始分析音频: {wav_path} (时长: {len(audio_samples) / 16000:.2f} 秒)")
     print(f"监听模型: {[m.name for m in engine.classifiers.values()]}")
@@ -182,13 +182,17 @@ def test_local_direct(
         time_sec = (offset // 2) / 16000.0
 
         if engine.feature_pipeline:
-            mel = engine.feature_pipeline.compute_melspectrogram(chunk_audio)
-            melspec_history.append(mel)
+            new_mels = engine.feature_pipeline.compute_melspectrogram(chunk_audio)
+            n_new = len(new_mels)
+            if n_new >= MEL_HISTORY_FRAMES:
+                melspec_buffer[:] = new_mels[-MEL_HISTORY_FRAMES:]
+            else:
+                melspec_buffer = np.roll(melspec_buffer, -n_new, axis=0)
+                melspec_buffer[-n_new:] = new_mels
 
-            if len(melspec_history) >= MEL_HISTORY_FRAMES:
-                mel_array = np.array(melspec_history, dtype=np.float32)
-                emb = engine.feature_pipeline.compute_embedding(mel_array)
-                embedding_history.append(emb)
+            emb = engine.feature_pipeline.compute_embedding(melspec_buffer)
+            embedding_buffer = np.roll(embedding_buffer, -1, axis=0)
+            embedding_buffer[-1] = emb
 
         for model in engine.classifiers.values():
             score = 0.0
@@ -196,12 +200,10 @@ def test_local_direct(
                 float_audio = chunk_audio.astype(np.float32).reshape(1, -1)
                 score = model.predict(float_audio)
             else:
-                if len(embedding_history) >= model.context_len:
-                    emb_window = list(embedding_history)[-model.context_len :]
-                    inp = np.array(emb_window, dtype=np.float32).reshape(
-                        1, model.context_len, EMBEDDING_DIM
-                    )
-                    score = model.predict(inp)
+                inp = embedding_buffer[-model.context_len:].reshape(
+                    1, model.context_len, EMBEDDING_DIM
+                )
+                score = model.predict(inp)
 
             if score >= model.cutoff:
                 detected_count += 1

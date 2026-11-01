@@ -48,7 +48,7 @@ import numpy as np
 import openvino as ov
 import typer
 
-from wyoming.audio import AudioChunk, AudioStop
+from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Attribution, Describe, Info, WakeModel, WakeProgram
 from wyoming.server import AsyncEventHandler, AsyncServer
@@ -359,9 +359,12 @@ class AudioFeaturePipeline:
         logger.info("正在初始化特征提取流水线...")
 
         # 1. 编译 MelSpectrogram 模型: 输入 [1, 1280] float32
+        # MelSpectrogram 属于极轻量的 DSP/FFT 频域转换 (耗时 <0.1ms)，在 CPU 上执行稳定性最高且编译极快
+        # 若在 NPU 上编译易因复杂频域算子导致 Level-Zero 驱动挂起或超时
+        melspec_dev = "CPU" if "NPU" in default_device.upper() else default_device
         self.melspec_model, self.melspec_device = runner.compile_model_safe(
             model_path=melspec_path,
-            requested_device=default_device,
+            requested_device=melspec_dev,
             static_shape=[1, CHUNK_SAMPLES],
         )
 
@@ -392,12 +395,13 @@ class AudioFeaturePipeline:
         """
         计算单帧 1280 采样点 (~80ms) 音频的梅尔频谱并进行标准缩放。
         公式: scaled_mel = (melspec / 10.0) + 2.0
+        确保返回为 (-1, 32) 的 2D 频谱帧矩阵。
         """
         inp = audio_1280_samples.astype(np.float32).reshape(1, CHUNK_SAMPLES)
         raw_mel = self.melspec_model([inp])[0]
         # 归一化缩放
         scaled_mel = (raw_mel / 10.0) + 2.0
-        return scaled_mel
+        return scaled_mel.reshape(-1, 32)
 
     def compute_embedding(self, mel_frames_76: np.ndarray) -> np.ndarray:
         """
@@ -554,8 +558,10 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
 
         # 客户端连接状态与流式缓冲区
         self.raw_audio_buffer = bytearray()
-        self.melspec_history = deque(maxlen=MEL_HISTORY_FRAMES)
-        self.embedding_history = deque(maxlen=64)
+        # 预先使用静音 (全零) 填充滑窗缓冲区，确保从收到第 1 秒语音起即可无延迟实时计算预测，无需盲等 7 秒缓冲
+        self.melspec_buffer = np.zeros((MEL_HISTORY_FRAMES, 32), dtype=np.float32)
+        self.embedding_buffer = np.zeros((DEFAULT_CONTEXT_LEN, EMBEDDING_DIM), dtype=np.float32)
+        self.has_detected = False
 
     async def handle_event(self, event: Event) -> bool:
         """分发处理 Wyoming 协议事件。"""
@@ -588,6 +594,11 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
 
             return True
 
+        if AudioStart.is_type(event.type):
+            # 音频流启动事件
+            self._reset_session()
+            return True
+
         if AudioChunk.is_type(event.type):
             chunk = AudioChunk.from_event(event)
             self.raw_audio_buffer.extend(chunk.audio)
@@ -607,6 +618,7 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                 except Exception as exc:
                     logger.error("音频帧处理或模型推理失败: %s", exc, exc_info=True)
                 if detected_model:
+                    self.has_detected = True
                     # 触发唤醒事件，告知客户端
                     logger.info(
                         "🎉 检测到唤醒词: '%s' (短语: '%s') 时间戳: %s",
@@ -620,12 +632,16 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                             timestamp=chunk.timestamp,
                         ).event()
                     )
-                    # 触发后适当衰减或清空最近的部分特征缓存，防止连续误触发
+                    # 触发后清空上下文缓冲，防止连续误触发
                     self._on_detected_cooldown()
 
             return True
 
         if AudioStop.is_type(event.type):
+            # 音频流结束: 若未检测到唤醒词，必须明确告知客户端 NotDetected，防止客户端死等导致超时！
+            if not self.has_detected:
+                logger.debug("音频流结束未触发唤醒，发送 NotDetected 事件")
+                await self.write_event(NotDetected().event())
             self._reset_session()
             return True
 
@@ -634,31 +650,36 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
     def _reset_session(self) -> None:
         """重置流式会话缓存。"""
         self.raw_audio_buffer.clear()
-        self.melspec_history.clear()
-        self.embedding_history.clear()
+        self.melspec_buffer.fill(0)
+        self.embedding_buffer.fill(0)
+        self.has_detected = False
 
     def _on_detected_cooldown(self) -> None:
         """检测命中后的缓存防抖清理。"""
-        # 清除最近几帧的 embedding，避免同一语音尾音再次打到高分
-        for _ in range(min(8, len(self.embedding_history))):
-            if self.embedding_history:
-                self.embedding_history.pop()
+        # 清空 embedding 缓冲，避免同一语音尾音再次打出高分
+        self.embedding_buffer.fill(0)
 
     async def _process_frame(self, audio_samples: np.ndarray) -> Optional[LoadedClassifier]:
         """处理单帧音频切片，并在各个模型上运行推理。"""
         pipeline = self.engine.feature_pipeline
         now = time.time()
 
-        # 1. 计算梅尔频谱
+        # 1. 计算梅尔频谱并滑窗滚入
         if pipeline:
-            mel = pipeline.compute_melspectrogram(audio_samples)
-            self.melspec_history.append(mel)
+            new_mels = pipeline.compute_melspectrogram(audio_samples)
+            n_new = len(new_mels)
+            if n_new >= MEL_HISTORY_FRAMES:
+                self.melspec_buffer[:] = new_mels[-MEL_HISTORY_FRAMES:]
+            else:
+                self.melspec_buffer = np.roll(self.melspec_buffer, -n_new, axis=0)
+                self.melspec_buffer[-n_new:] = new_mels
 
-            # 2. 累积到 76 帧梅尔频谱后，计算 96 维语音嵌入
-            if len(self.melspec_history) >= MEL_HISTORY_FRAMES:
-                mel_array = np.array(self.melspec_history, dtype=np.float32)
-                embedding = pipeline.compute_embedding(mel_array)
-                self.embedding_history.append(embedding)
+            # 2. 由 76 帧梅尔频谱计算 96 维语音嵌入
+            embedding = pipeline.compute_embedding(self.melspec_buffer)
+
+            # 滑窗滚入 1 帧新的 embedding
+            self.embedding_buffer = np.roll(self.embedding_buffer, -1, axis=0)
+            self.embedding_buffer[-1] = embedding
 
         # 3. 遍历所有激活的模型并发评估
         for model in self.active_models:
@@ -668,13 +689,10 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                 float_audio = audio_samples.astype(np.float32).reshape(1, -1)
                 score = model.predict(float_audio)
             else:
-                # 基于 Embedding 的分类器
-                if len(self.embedding_history) >= model.context_len:
-                    # 取最近 context_len 帧嵌入 (通常为 16 帧)
-                    emb_window = list(self.embedding_history)[-model.context_len:]
-                    inp_emb = np.array(emb_window, dtype=np.float32).reshape(
-                        1, model.context_len, EMBEDDING_DIM
-                    )
+                # 基于 Embedding 的分类器: 取最近 context_len 帧 (通常 16 帧)
+                if len(self.embedding_buffer) >= model.context_len:
+                    emb_window = self.embedding_buffer[-model.context_len:]
+                    inp_emb = emb_window.reshape(1, model.context_len, EMBEDDING_DIM)
                     score = model.predict(inp_emb)
 
             if score > 0.05:
