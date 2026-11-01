@@ -1009,6 +1009,11 @@ def main(
     )
 
     # 5. 构建并注册 Wyoming 协议描述元数据（向 Home Assistant 宣告支持的音色与语言）
+    tts_attribution = Attribution(
+        name="Kokoro TTS (OpenVINO)",
+        url="https://github.com/remsky/Kokoro-FastAPI",
+    )
+
     tts_voices: List[TtsVoice] = []
     for v_name in sorted(voices.keys()):
         prefix = v_name[0].lower()
@@ -1019,6 +1024,9 @@ def main(
                 name=v_name,
                 description=v_desc,
                 languages=[v_lang],
+                attribution=tts_attribution,
+                installed=True,
+                version="2.0.0",
             )
         )
 
@@ -1030,10 +1038,7 @@ def main(
             TtsProgram(
                 name="kokoro-openvino",
                 description="Kokoro-82M 多语言语音合成 (OpenVINO 高速推理)",
-                attribution=Attribution(
-                    name="DeepMind / Antigravity / Kokoro-FastAPI",
-                    url="https://github.com/remsky/Kokoro-FastAPI",
-                ),
+                attribution=tts_attribution,
                 installed=True,
                 voices=tts_voices,
                 version="2.0.0",
