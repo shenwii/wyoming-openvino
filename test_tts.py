@@ -144,7 +144,14 @@ def main(
                 chunk_lang = "en"
 
         chunk_g2p = g2p_manager.get_g2p(chunk_lang)
-        tokens = process_text_with_misaki(chunk_g2p, chunk_text, vocab=vocab)
+        en_g2p = g2p_manager.get_g2p("en") if chunk_lang != "en" else None
+        tokens = process_text_with_misaki(
+            chunk_g2p,
+            chunk_text,
+            vocab=vocab,
+            en_g2p=en_g2p,
+            target_lang=chunk_lang,
+        )
         token_len = tokens.shape[1]
 
         if voice_data.ndim == 2:
