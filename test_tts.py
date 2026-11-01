@@ -114,7 +114,10 @@ def main(
     compiled_model = core.compile_model(model, device, config=ov_config)
 
     # 3. 初始化 G2P 并转换音素
-    g2p_manager = MultiLangG2P(fallback_language="zh" if language == "auto" else language)
+    g2p_manager = MultiLangG2P(
+        fallback_language="zh" if language == "auto" else language,
+        vocab=vocab,
+    )
 
     # 自动识别语言（若文本包含汉字，必须优先使用 zh）
     target_lang = language
@@ -144,13 +147,10 @@ def main(
                 chunk_lang = "en"
 
         chunk_g2p = g2p_manager.get_g2p(chunk_lang)
-        en_g2p = g2p_manager.get_g2p("en") if chunk_lang != "en" else None
         tokens = process_text_with_misaki(
             chunk_g2p,
             chunk_text,
             vocab=vocab,
-            en_g2p=en_g2p,
-            target_lang=chunk_lang,
         )
         token_len = tokens.shape[1]
 

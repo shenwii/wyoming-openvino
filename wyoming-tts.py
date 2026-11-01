@@ -79,36 +79,6 @@ VOICE_PREFIX_TO_LANG: Dict[str, str] = {
     "k": "ko",  # Korean
 }
 
-# Pinyin 声母与韵母对应到 Kokoro IPA 国际音标映射表 (用于在英文版基础模型中兼容发音中文)
-PINYIN_INITIALS_TO_IPA: Dict[str, str] = {
-    "b": "p", "p": "pʰ", "m": "m", "f": "f",
-    "d": "t", "t": "tʰ", "n": "n", "l": "l",
-    "g": "k", "k": "kʰ", "h": "x",
-    "j": "tɕ", "q": "tɕʰ", "x": "ɕ",
-    "zh": "ʈʃ", "ch": "ʈʃʰ", "sh": "ʃ", "r": "ʐ",
-    "z": "ts", "c": "tsʰ", "s": "s",
-    "y": "j", "w": "w",
-}
-
-PINYIN_FINALS_TO_IPA: Dict[str, str] = {
-    "a": "a", "o": "ɔ", "e": "ə", "i": "i", "u": "u", "v": "y", "ü": "y",
-    "ai": "aɪ", "ei": "eɪ", "ao": "aʊ", "ou": "oʊ",
-    "an": "an", "en": "ən", "ang": "ɑŋ", "eng": "əŋ", "ong": "ʊŋ",
-    "ia": "ja", "ie": "jɛ", "iao": "jaʊ", "iu": "joʊ",
-    "ian": "jɛn", "in": "in", "iang": "jɑŋ", "ing": "iŋ", "iong": "jʊŋ",
-    "ua": "wa", "uo": "wɔ", "uai": "waɪ", "ui": "weɪ",
-    "uan": "wan", "un": "wən", "uang": "wɑŋ",
-    "ue": "yɛ", "üe": "yɛ", "ve": "yɛ", "er": "ɑɻ",
-}
-
-PUNCT_ASCII_MAP: Dict[str, str] = {
-    "，": ", ", "。": ". ", "！": "! ", "？": "? ",
-    "；": "; ", "：": ": ", "、": ", ", "“": '"', "”": '"',
-    "‘": "'", "’": "'", "（": " (", "）": ") ", "《": '"', "》": '"',
-    "—": "—", "…": "…",
-}
-
-
 # ===========================================================================
 # 多语言 G2P（字素到音素）转换提取与辅助工具
 # ===========================================================================
@@ -139,121 +109,15 @@ def extract_phonemes(res) -> str:
     return str(res)
 
 
-def is_vocab_chinese_compatible(vocab: Optional[Dict[str, int]]) -> bool:
-    """
-    检查当前模型词汇表是否原生包含 Kokoro-82M-v1.1-zh 的中文注音与汉字音素。
-    若包含（如 'ㄓ', 'ㄅ', '中', '阳' 等），说明为 v1.1-zh 原生中文模型；
-    若不包含，说明为基于 Kokoro v1.0 / v0.19 英文版导出的模型（如 Echo9Zulu）。
-    """
-    if not vocab:
-        return False
-    zh_markers = ("ㄓ", "ㄅ", "中", "阳", "要", "我", "1", "2")
-    return any(m in vocab for m in zh_markers)
-
-
-def pinyin_syllable_to_ipa(syl: str) -> str:
-    """将单个带调号拼音音节 (如 sheng1, huo2, de5) 转换为 Kokoro IPA 音标。"""
-    syl = syl.strip().lower()
-    if not syl:
-        return ""
-
-    tone = ""
-    if syl[-1].isdigit():
-        tone = syl[-1]
-        syl = syl[:-1]
-
-    if not syl:
-        return ""
-
-    initial = ""
-    for init in ("zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x", "r", "z", "c", "s", "y", "w"):
-        if syl.startswith(init):
-            initial = init
-            final = syl[len(init):]
-            break
-    else:
-        final = syl
-
-    ipa_init = PINYIN_INITIALS_TO_IPA.get(initial, initial)
-
-    if initial in ("zh", "ch", "sh", "r", "z", "c", "s") and final == "i":
-        ipa_final = "ɨ"
-    elif initial in ("j", "q", "x", "y") and final in ("u", "ue", "uan", "un", "v", "ve", "van", "vn"):
-        v_map = {"u": "y", "ue": "yɛ", "uan": "yɛn", "un": "yn", "v": "y", "ve": "yɛ", "van": "yɛn", "vn": "yn"}
-        ipa_final = v_map.get(final, PINYIN_FINALS_TO_IPA.get(final, final))
-    else:
-        ipa_final = PINYIN_FINALS_TO_IPA.get(final, final)
-
-    # 声调映射轻重读
-    stress = "ˈ" if tone in ("1", "4") else ("ˌ" if tone in ("2", "3") else "")
-    return stress + ipa_init + ipa_final
-
-
-def chinese_to_ipa(text: str, en_g2p=None) -> str:
-    """
-    针对旧版英文模型 (Echo9Zulu 等)，将中文文本转换为标准 Kokoro IPA 音标；
-    文本中的英文单词通过 en_g2p 转为标准英文 IPA，确保中英混排与纯中文均能完美发音。
-    """
-    # 尝试将中文数字转汉字
-    try:
-        import cn2an
-        text = cn2an.transform(text, "an2cn")
-    except Exception:
-        pass
-
-    # 中文标点规整为标准 ASCII 标点
-    for k, v in PUNCT_ASCII_MAP.items():
-        text = text.replace(k, v)
-
-    # 尝试使用 pypinyin 分词转换为拼音列表
-    try:
-        import pypinyin
-        py_tokens = pypinyin.lazy_pinyin(text, style=pypinyin.Style.TONE3, neutral_tone_with_five=True)
-    except Exception as e:
-        logger.warning("执行 pypinyin 失败 (%s)，请确保安装: pip install pypinyin", e)
-        return text
-
-    ipa_parts = []
-    neutral_pinyin = {"de", "le", "ne", "ba", "ma", "men", "zi", "tou", "di", "ge", "a"}
-
-    for tok in py_tokens:
-        tok = tok.strip()
-        if not tok:
-            continue
-
-        if re.match(r"^[a-zA-Z]+[1-5]$", tok):
-            ipa_parts.append(pinyin_syllable_to_ipa(tok))
-        elif re.match(r"^[a-zA-Z]+$", tok):
-            # 纯英文字母单词：优先使用英文 G2P
-            converted = False
-            if en_g2p:
-                try:
-                    en_res = extract_phonemes(en_g2p(tok)).strip()
-                    if en_res:
-                        ipa_parts.append(en_res)
-                        converted = True
-                except Exception:
-                    pass
-            if not converted:
-                # 检查是否为常见无调号拼音轻声词
-                if tok.lower() in neutral_pinyin:
-                    ipa_parts.append(pinyin_syllable_to_ipa(tok))
-                else:
-                    ipa_parts.append(tok)
-        else:
-            ipa_parts.append(tok)
-
-    return " ".join(ipa_parts)
-
-
 class MultiLangG2P:
     """
     多语言 G2P 转换管理器。
     按需延迟加载各语言的 G2P 引擎，支持同一服务内同时处理中、英、日等语言文本。
     """
 
-    def __init__(self, fallback_language: str = "zh") -> None:
+    def __init__(self, fallback_language: str = "zh", vocab: Optional[Dict[str, int]] = None) -> None:
         self.fallback_language = fallback_language.split("-")[0].lower()
+        self.vocab = vocab
         self._g2p_instances: Dict[str, object] = {}
 
     def get_g2p(self, language: Optional[str] = None):
@@ -299,9 +163,17 @@ class MultiLangG2P:
                     except Exception:
                         return w
 
-                # 兼容不同 misaki 版本的 ZHG2P 初始化参数 (优先 version="1.1"，其次 None，再次无参)
+                # 智能版本自适应：
+                # 检查当前模型词汇表中是否包含 Kokoro v1.1-zh 专属的注音符号（如 'ㄓ', 'ㄅ' 等）
+                # - 若包含，说明为 Kokoro-82M-v1.1-zh 原生注音模型，使用 version="1.1"；
+                # - 若不包含（如 Kokoro-82M / Echo9Zulu 等基础 OpenVINO 模型），官方推荐使用 version=None，
+                #   生成与基础模型词汇表 100% 匹配的国际音标与声调箭头（↓↑→↗↘），保证发音自然优美，绝不掉词！
+                is_v11 = bool(self.vocab and any(m in self.vocab for m in ("ㄓ", "ㄅ", "中", "阳", "要")))
+                zh_version = "1.1" if is_v11 else None
+                logger.info("初始化中文 G2P: version=%s (检测到 v1.1 注音词表: %s)", zh_version, is_v11)
+
                 try:
-                    return cls(version="1.1", en_callable=fast_en_callable)
+                    return cls(version=zh_version, en_callable=fast_en_callable)
                 except (TypeError, ValueError):
                     try:
                         return cls(version=None, en_callable=fast_en_callable)
@@ -503,32 +375,21 @@ def process_text_with_misaki(
     g2p,
     text: str,
     vocab: Optional[Dict[str, int]] = None,
-    en_g2p=None,
-    target_lang: str = "zh",
+    **kwargs,
 ) -> np.ndarray:
     """
     使用 misaki 将文本转换为 Kokoro 模型所需的 token ID 序列。
-    支持从模型 config.json 动态传入精确 vocab 映射字典，并智能自适应处理中文模型与英文基础模型兼容。
+    支持从模型 config.json 动态传入精确 vocab 映射字典。
     """
-    active_vocab = vocab if vocab is not None else VOCAB
-    has_zh_chars = bool(re.search(r"[\u4E00-\u9FFF]", text))
-
-    # 智能检查：如果当前模型词表缺少 v1.1-zh 注音与汉字字符（如旧版英文 IPA 模型 Echo9Zulu），
-    # 自动切换至 Pinyin -> IPA 兼容模式，保证汉字和中英混排 100% 能够被旧模型发音，绝不丢词！
-    if (target_lang in ("zh", "z") or has_zh_chars) and not is_vocab_chinese_compatible(active_vocab):
-        logger.info(
-            "当前模型词表缺少 v1.1-zh 注音词表支持（使用的是旧版英文 IPA 模型），自动启用 Pinyin -> IPA 兼容方案合成中文"
-        )
-        phoneme_str = chinese_to_ipa(text, en_g2p=en_g2p)
-        logger.info("音素转换 (Pinyin -> IPA 兼容): '%s' -> '%s'", text, phoneme_str)
-    else:
-        res = g2p(text)
-        phoneme_str = extract_phonemes(res)
-        logger.info("音素转换: '%s' -> '%s'", text, phoneme_str)
+    res = g2p(text)
+    phoneme_str = extract_phonemes(res)
+    logger.info("音素转换: '%s' -> '%s'", text, phoneme_str)
 
     if not phoneme_str:
         logger.warning("文本 '%s' 未能提取出有效音素", text)
         return np.array([[0, 0]], dtype=np.int64)
+
+    active_vocab = vocab if vocab is not None else VOCAB
 
     # 逐字符查表转换为 token ID
     # 过滤掉不存在的字符，首尾各填充 0 (PAD)
@@ -775,23 +636,28 @@ def resolve_model_and_voices(
 
     # 尝试加载官方 config.json 中的 vocab 字典（保证中/英/日音标精准对齐）
     vocab: Optional[Dict[str, int]] = None
-    config_file = base_dir / "config.json"
-    if config_file.exists():
-        try:
-            import json
-            with config_file.open("r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if "vocab" in cfg and isinstance(cfg["vocab"], dict):
-                vocab = cfg["vocab"]
-                logger.info("从 %s 成功载入官方模型词汇表 (包含 %d 个音标 token 符号)", config_file.name, len(vocab))
-                if is_vocab_chinese_compatible(vocab):
-                    logger.info("🎉 当前模型词汇表支持 Kokoro-82M-v1.1-zh 原生中文注音及汉字音素！")
-                else:
-                    logger.info(
-                        "💡 当前模型词汇表为 Kokoro 英文基础版 (IPA)。若需原生地道中文发音，建议配合使用 Kokoro-82M-v1.1-zh 模型目录"
-                    )
-        except Exception as e:
-            logger.warning("解析 %s 的 vocab 失败: %s", config_file, e)
+    config_candidates = [
+        base_dir / "config.json",
+        base_dir.parent / "config.json",
+    ]
+    if model_dir:
+        config_candidates.insert(0, Path(model_dir) / "config.json")
+    if model_path:
+        config_candidates.insert(0, Path(model_path).parent / "config.json")
+
+    for cfg_cand in config_candidates:
+        if cfg_cand.exists():
+            try:
+                import json
+                with cfg_cand.open("r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if "vocab" in cfg and isinstance(cfg["vocab"], dict):
+                    vocab = cfg["vocab"]
+                    is_v11 = any(m in vocab for m in ("ㄓ", "ㄅ", "中", "阳", "要"))
+                    logger.info("从 %s 成功载入官方模型词汇表 (包含 %d 个音标 token 符号, v1.1-zh=%s)", cfg_cand.name, len(vocab), is_v11)
+                    break
+            except Exception as e:
+                logger.warning("解析 %s 的 vocab 失败: %s", cfg_cand, e)
 
     # 2. 确定声音资源位置
     voices: Dict[str, np.ndarray] = {}
@@ -1012,15 +878,12 @@ class TTSEventHandler(AsyncEventHandler):
                 target_lang = "en"
 
         g2p = self.g2p_manager.get_g2p(target_lang)
-        en_g2p = self.g2p_manager.get_g2p("en") if target_lang != "en" else None
 
-        # 文本 → 音素 token IDs（传入官方精准 vocab 字典与语言配置）
+        # 文本 → 音素 token IDs（传入官方精准 vocab 字典）
         tokens = process_text_with_misaki(
             g2p,
             text,
             vocab=self.vocab,
-            en_g2p=en_g2p,
-            target_lang=target_lang,
         )
         t_g2p = time.perf_counter() - t0
 
@@ -1235,7 +1098,10 @@ def main(
 
     # ---- 初始化多语言 G2P 管理器 ----
     default_lang = language or "auto"
-    g2p_manager = MultiLangG2P(fallback_language="zh" if default_lang == "auto" else default_lang)
+    g2p_manager = MultiLangG2P(
+        fallback_language="zh" if default_lang == "auto" else default_lang,
+        vocab=vocab,
+    )
 
     # ---- 自动扫描所有声音并构建 Wyoming 服务信息 ----
     tts_attribution = Attribution(
