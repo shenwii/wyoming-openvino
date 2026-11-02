@@ -115,6 +115,14 @@ models/
 ### 1. 启动 STT 语音识别服务
 
 ```bash
+# 强制输出简体中文 (推荐普通话场景)
+python wyoming-stt.py \
+    --model-dir /path/to/whisper-openvino \
+    --device GPU \
+    --to-simplified \
+    --port 10020
+
+# 默认输出繁体中文
 python wyoming-stt.py \
     --model-dir /path/to/whisper-openvino \
     --device GPU \
@@ -191,6 +199,7 @@ python test_wakeword.py sample.wav --server 127.0.0.1:10400
 | `--model-dir` | `-m` | (必填) | Whisper 模型目录 |
 | `--device` | `-d` | `GPU` | 推理设备 (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
 | `--language` | `-l` | `auto` | 默认语言（优先遵循 HA 协议，其次自动检测） |
+| `--to-simplified` | | `False` | 中文模式下强制输出简体中文（未指定时默认为繁体中文） |
 | `--port` | `-p` | `10020` | 服务监听端口 |
 | `--host` | | `0.0.0.0` | 监听地址 |
 

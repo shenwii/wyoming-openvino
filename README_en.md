@@ -114,6 +114,14 @@ models/
 ### 1. Start STT (Speech-to-Text) Service
 
 ```bash
+# Force Simplified Chinese output
+python wyoming-stt.py \
+    --model-dir /path/to/whisper-openvino \
+    --device GPU \
+    --to-simplified \
+    --port 10020
+
+# Default Traditional Chinese output
 python wyoming-stt.py \
     --model-dir /path/to/whisper-openvino \
     --device GPU \
@@ -190,6 +198,7 @@ python test_wakeword.py sample.wav --server 127.0.0.1:10400
 | `--model-dir` | `-m` | (Required) | Directory containing OpenVINO Whisper model files |
 | `--device` | `-d` | `GPU` | Inference target (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
 | `--language` | `-l` | `auto` | Default language (prioritizes HA Wyoming request; auto-detects otherwise) |
+| `--to-simplified` | | `False` | Force Simplified Chinese output in Chinese mode (defaults to Traditional Chinese) |
 | `--port` | `-p` | `10020` | Server listening port |
 | `--host` | | `0.0.0.0` | Server bind address |
 

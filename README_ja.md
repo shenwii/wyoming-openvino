@@ -114,6 +114,14 @@ models/
 ### 1. STT (音声認識) サービスの起動
 
 ```bash
+# 中国語モードで簡体字出力を強制（標準中国語推奨）
+python wyoming-stt.py \
+    --model-dir /path/to/whisper-openvino \
+    --device GPU \
+    --to-simplified \
+    --port 10020
+
+# デフォルト（繁体字出力）
 python wyoming-stt.py \
     --model-dir /path/to/whisper-openvino \
     --device GPU \
@@ -190,6 +198,7 @@ python test_wakeword.py sample.wav --server 127.0.0.1:10400
 | `--model-dir` | `-m` | (必須) | Whisper モデルディレクトリのパス |
 | `--device` | `-d` | `GPU` | 推論デバイス (`CPU` / `GPU` / `AUTO` / `MULTI:CPU,GPU`) |
 | `--language` | `-l` | `auto` | デフォルト言語（HA のリクエスト優先、未指定時は自動検出） |
+| `--to-simplified` | | `False` | 中国語認識モードで簡体字出力を強制（未指定時はデフォルトで繁体字を出力） |
 | `--port` | `-p` | `10020` | リッスンポート番号 |
 | `--host` | | `0.0.0.0` | リッスンアドレス |
 
