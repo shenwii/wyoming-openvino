@@ -215,6 +215,9 @@ python test_wakeword.py sample.wav --server 127.0.0.1:10400
 | `--refractory` | | `2.0` | Cooldown period after detection in seconds |
 | `--port` | `-p` | `10400` | Server listening port (HA Wyoming openWakeWord default: 10400) |
 | `--host` | | `0.0.0.0` | Server bind address |
+| `--log-level` | | `INFO` | Logging verbosity (`DEBUG` / `INFO` / `WARNING` / `ERROR`) |
+| `--melspec-model` | | `None` | Path to custom MelSpectrogram feature extractor model |
+| `--embedding-model` | | `None` | Path to custom Embedding feature extractor model |
 
 ---
 

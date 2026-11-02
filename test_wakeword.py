@@ -120,8 +120,8 @@ async def test_against_wyoming_server(wav_path: Path, server_addr: str) -> None:
 def test_local_direct(
     wav_path: Path,
     model_paths: List[str],
-    device: str,
-    cutoff: float,
+    device: Optional[str] = None,
+    cutoff: Optional[float] = None,
     config_path: Optional[Path] = None,
 ) -> None:
     """在本地直接加载 OpenVINO 推理引擎评估音频。"""
@@ -139,22 +139,35 @@ def test_local_direct(
     CHUNK_BYTES = mod.CHUNK_BYTES
     MEL_HISTORY_FRAMES = mod.MEL_HISTORY_FRAMES
     EMBEDDING_DIM = mod.EMBEDDING_DIM
+    DEFAULT_CONTEXT_LEN = mod.DEFAULT_CONTEXT_LEN
 
     if config_path and config_path.exists():
         cfg = load_config_file(config_path)
+        if device is not None:
+            cfg.default_device = device
+        if cutoff is not None:
+            cfg.default_cutoff = cutoff
     else:
-        cfg = WakewordServerConfig(default_device=device, default_cutoff=cutoff)
-        for m_p in model_paths:
-            name = Path(m_p).stem.split("_v")[0]
-            cfg.models.append(
-                SingleModelConfig(
-                    name=name,
-                    model_path=m_p,
-                    phrase=name.replace("_", " ").title(),
-                    cutoff=cutoff,
-                    device=device,
-                )
-            )
+        cfg = WakewordServerConfig(
+            default_device=device or "NPU",
+            default_cutoff=cutoff if cutoff is not None else 0.5,
+        )
+
+    # 合并命令行中指定的模型
+    for m_p in model_paths:
+        name = Path(m_p).stem.split("_v")[0]
+        entry = SingleModelConfig(
+            name=name,
+            model_path=m_p,
+            phrase=name.replace("_", " ").title(),
+            cutoff=cutoff,
+            device=device,
+        )
+        existing_idx = next((i for i, m in enumerate(cfg.models) if m.name == name), None)
+        if existing_idx is not None:
+            cfg.models[existing_idx] = entry
+        else:
+            cfg.models.append(entry)
 
     print(f"正在初始化 OpenVINO 唤醒词引擎 (目标设备: {cfg.default_device})...")
     engine = WakeWordEngine(cfg)
@@ -235,16 +248,16 @@ def test(
         "-c",
         help="从配置文件读取模型列表",
     ),
-    device: str = typer.Option(
-        "NPU",
+    device: Optional[str] = typer.Option(
+        None,
         "--device",
         "-d",
-        help="本地推理设备 (优先 NPU，自动回退 GPU -> CPU)",
+        help="本地推理设备 (优先 NPU，自动回退 GPU -> CPU) [缺省: NPU]",
     ),
-    cutoff: float = typer.Option(
-        0.5,
+    cutoff: Optional[float] = typer.Option(
+        None,
         "--cutoff",
-        help="唤醒阈值 (0.0 ~ 1.0)",
+        help="唤醒阈值 (0.0 ~ 1.0) [缺省: 0.5]",
     ),
     server: Optional[str] = typer.Option(
         None,

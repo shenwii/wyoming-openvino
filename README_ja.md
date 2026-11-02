@@ -215,6 +215,9 @@ python test_wakeword.py sample.wav --server 127.0.0.1:10400
 | `--refractory` | | `2.0` | 検出後のクールダウン時間 (秒) |
 | `--port` | `-p` | `10400` | リッスンポート (HA Wyoming openWakeWord 公式ポート: 10400) |
 | `--host` | | `0.0.0.0` | リッスンアドレス |
+| `--log-level` | | `INFO` | ログ出力レベル (`DEBUG` / `INFO` / `WARNING` / `ERROR`) |
+| `--melspec-model` | | `None` | MelSpectrogram 特徴抽出モデルパス（任意） |
+| `--embedding-model` | | `None` | Embedding 特徴抽出モデルパス（任意） |
 
 ---
 

@@ -65,6 +65,20 @@ except ImportError:
 # ---------------------------------------------------------------------------
 logger = logging.getLogger("wyoming-wakeword")
 
+
+def configure_logging(level_name: str) -> None:
+    """统一配置全局日志级别，支持动态调整。"""
+    numeric_level = getattr(logging, str(level_name).upper(), logging.INFO)
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logging.getLogger().setLevel(numeric_level)
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(numeric_level)
+    logger.setLevel(numeric_level)
+
+
 # ---------------------------------------------------------------------------
 # 常量定义
 # ---------------------------------------------------------------------------
@@ -89,9 +103,9 @@ class SingleModelConfig:
     name: str
     model_path: str
     phrase: Optional[str] = None
-    cutoff: float = 0.5
-    refractory: float = 2.0
-    device: Optional[str] = None
+    cutoff: Optional[float] = None       # 若未指定则继承 WakewordServerConfig.default_cutoff
+    refractory: Optional[float] = None   # 若未指定则继承 WakewordServerConfig.default_refractory
+    device: Optional[str] = None         # 若未指定则继承 WakewordServerConfig.default_device
     languages: List[str] = field(default_factory=lambda: ["en"])
 
 
@@ -292,12 +306,16 @@ class LoadedClassifier:
         actual_device: str,
         context_len: int = DEFAULT_CONTEXT_LEN,
         is_end_to_end: bool = False,
+        effective_cutoff: float = 0.5,
+        effective_refractory: float = 2.0,
     ) -> None:
         self.config = config
         self.compiled_model = compiled_model
         self.actual_device = actual_device
         self.context_len = context_len
         self.is_end_to_end = is_end_to_end
+        self._effective_cutoff = effective_cutoff
+        self._effective_refractory = effective_refractory
         self.last_triggered_time: float = 0.0
 
     @property
@@ -310,11 +328,19 @@ class LoadedClassifier:
 
     @property
     def cutoff(self) -> float:
-        return self.config.cutoff
+        return self._effective_cutoff
+
+    @cutoff.setter
+    def cutoff(self, value: float) -> None:
+        self._effective_cutoff = value
 
     @property
     def refractory(self) -> float:
-        return self.config.refractory
+        return self._effective_refractory
+
+    @refractory.setter
+    def refractory(self, value: float) -> None:
+        self._effective_refractory = value
 
     def predict(self, feature_input: np.ndarray) -> float:
         """执行推理并返回唤醒概率得分 (0.0 ~ 1.0)。"""
@@ -464,6 +490,9 @@ class WakeWordEngine:
     def _load_classifier(self, m_cfg: SingleModelConfig) -> None:
         """加载、编译单个唤醒词分类器并注册。"""
         device = m_cfg.device or self.config.default_device
+        cutoff = m_cfg.cutoff if m_cfg.cutoff is not None else self.config.default_cutoff
+        refractory = m_cfg.refractory if m_cfg.refractory is not None else self.config.default_refractory
+
         path = Path(m_cfg.model_path).expanduser().resolve()
         if not path.exists():
             # 尝试在 models 目录下寻找
@@ -522,6 +551,8 @@ class WakeWordEngine:
             actual_device=actual_dev,
             context_len=context_len,
             is_end_to_end=is_e2e,
+            effective_cutoff=cutoff,
+            effective_refractory=refractory,
         )
         self.classifiers[m_cfg.name] = classifier
         logger.info(
@@ -708,6 +739,16 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
 # ===========================================================================
 # 配置文件解析与构建
 # ===========================================================================
+def _safe_float(val, default: float) -> float:
+    """安全转换为浮点数，若为 None 或转换异常则返回默认值。"""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def load_config_file(config_path: Path) -> WakewordServerConfig:
     """从 YAML 或 JSON 文件加载服务器与模型配置。"""
     if not config_path.exists():
@@ -728,34 +769,72 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         else:
             raise ValueError(f"不支持的配置文件类型: {ext}，仅支持 .yaml, .yml 或 .json")
 
-    server_sec = raw_dict.get("server", {})
-    cfg = WakewordServerConfig(
-        host=server_sec.get("host", "0.0.0.0"),
-        port=server_sec.get("port", 10400),
-        log_level=server_sec.get("log_level", "INFO"),
-        default_device=raw_dict.get("default_device", "NPU"),
-        default_cutoff=float(raw_dict.get("default_cutoff", 0.5)),
-        default_refractory=float(raw_dict.get("default_refractory", 2.0)),
+    # 增强容错兼容性: 支持 server / feature_models 节，同时兼顾顶层配置与连字符写法
+    server_sec = raw_dict.get("server") or {}
+    feat_sec = raw_dict.get("feature_models") or {}
+
+    host = server_sec.get("host") or raw_dict.get("host") or "0.0.0.0"
+    port_val = server_sec.get("port") or raw_dict.get("port") or 10400
+    try:
+        port = int(port_val)
+    except (ValueError, TypeError):
+        port = 10400
+
+    log_level = (
+        server_sec.get("log_level")
+        or server_sec.get("log-level")
+        or raw_dict.get("log_level")
+        or raw_dict.get("log-level")
+        or "INFO"
     )
 
-    feat_sec = raw_dict.get("feature_models", {})
-    cfg.melspec_model_path = feat_sec.get("melspec_model")
-    cfg.embedding_model_path = feat_sec.get("embedding_model")
+    default_device = (
+        raw_dict.get("default_device")
+        or raw_dict.get("device")
+        or "NPU"
+    )
 
-    raw_models = raw_dict.get("models", [])
+    default_cutoff = _safe_float(
+        raw_dict.get("default_cutoff") or raw_dict.get("cutoff"), 0.5
+    )
+    default_refractory = _safe_float(
+        raw_dict.get("default_refractory") or raw_dict.get("refractory"), 2.0
+    )
+
+    melspec_model = feat_sec.get("melspec_model") or raw_dict.get("melspec_model")
+    embedding_model = feat_sec.get("embedding_model") or raw_dict.get("embedding_model")
+
+    cfg = WakewordServerConfig(
+        host=str(host),
+        port=port,
+        log_level=str(log_level).upper(),
+        default_device=str(default_device),
+        default_cutoff=default_cutoff,
+        default_refractory=default_refractory,
+        melspec_model_path=str(melspec_model) if melspec_model else None,
+        embedding_model_path=str(embedding_model) if embedding_model else None,
+    )
+
+    raw_models = raw_dict.get("models") or []
     for item in raw_models:
+        if not isinstance(item, dict):
+            continue
         m_name = item.get("name")
         m_path = item.get("model_path")
         if not m_name or not m_path:
             logger.warning("跳过无效的模型配置项 (缺少 name 或 model_path): %s", item)
             continue
 
+        cutoff_raw = item.get("cutoff")
+        refractory_raw = item.get("refractory")
+
         model_entry = SingleModelConfig(
-            name=m_name,
-            model_path=m_path,
-            phrase=item.get("phrase", m_name.replace("_", " ").title()),
-            cutoff=float(item.get("cutoff", cfg.default_cutoff)),
-            refractory=float(item.get("refractory", cfg.default_refractory)),
+            name=str(m_name),
+            model_path=str(m_path),
+            phrase=item.get("phrase", str(m_name).replace("_", " ").title()),
+            # 若模型未显式配置 cutoff / refractory，保持 None 以动态继承服务全局默认值
+            cutoff=_safe_float(cutoff_raw, cfg.default_cutoff) if cutoff_raw is not None else None,
+            refractory=_safe_float(refractory_raw, cfg.default_refractory) if refractory_raw is not None else None,
             device=item.get("device"),
             languages=item.get("languages", ["en"]),
         )
@@ -789,69 +868,88 @@ def main(
         "--model-dir",
         help="自动扫描并加载该目录下所有的 .onnx/.tflite/.xml 唤醒词模型",
     ),
-    device: str = typer.Option(
-        "NPU",
+    device: Optional[str] = typer.Option(
+        None,
         "--device",
         "-d",
-        help="默认推理计算设备 (优先使用 NPU，自动回退 GPU -> CPU)",
+        help="默认推理计算设备 (优先使用 NPU，自动回退 GPU -> CPU) [缺省: NPU]",
     ),
-    cutoff: float = typer.Option(
-        0.5,
+    cutoff: Optional[float] = typer.Option(
+        None,
         "--cutoff",
-        help="默认唤醒置信度阈值 (0.0 ~ 1.0)",
+        help="默认唤醒置信度阈值 (0.0 ~ 1.0) [缺省: 0.5]",
     ),
-    refractory: float = typer.Option(
-        2.0,
+    refractory: Optional[float] = typer.Option(
+        None,
         "--refractory",
-        help="默认唤醒触发后的防重复冷却时间 (秒)",
+        help="默认唤醒触发后的防重复冷却时间 (秒) [缺省: 2.0]",
     ),
-    host: str = typer.Option(
-        "0.0.0.0",
+    host: Optional[str] = typer.Option(
+        None,
         "--host",
-        help="服务监听网络地址",
+        help="服务监听网络地址 [缺省: 0.0.0.0]",
     ),
-    port: int = typer.Option(
-        10400,
+    port: Optional[int] = typer.Option(
+        None,
         "--port",
         "-p",
-        help="服务监听端口",
+        help="服务监听端口 [缺省: 10400]",
     ),
-    log_level: str = typer.Option(
-        "INFO",
+    log_level: Optional[str] = typer.Option(
+        None,
         "--log-level",
-        help="日志记录级别 (DEBUG / INFO / WARNING / ERROR)",
+        help="日志记录级别 (DEBUG / INFO / WARNING / ERROR) [缺省: INFO]",
+    ),
+    melspec_model: Optional[str] = typer.Option(
+        None,
+        "--melspec-model",
+        help="MelSpectrogram 特征提取模型路径 (可选)",
+    ),
+    embedding_model: Optional[str] = typer.Option(
+        None,
+        "--embedding-model",
+        help="Embedding 特征提取模型路径 (可选)",
     ),
 ) -> None:
     """启动基于 OpenVINO 的多模型唤醒词检测服务。"""
 
-    # 1. 初始化基础日志
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    # 1. 初始化基础日志 (若命令行指定了 log_level 则优先作为启动日志级别，否则使用 INFO)
+    init_log_level = log_level or "INFO"
+    configure_logging(init_log_level)
 
-    # 2. 确定配置来源 (文件 vs 命令行)
-    if config and config.exists():
+    # 2. 确定配置基准 (配置文件优先加载为基准，若无配置文件则采用内置默认值)
+    if config:
+        if not config.exists():
+            logger.error("指定的配置文件不存在: %s", config)
+            sys.exit(1)
         logger.info("从配置文件加载服务参数: %s", config)
         server_config = load_config_file(config)
-        # 命令行参数覆盖配置文件对应的顶层字段 (若用户显式提供)
-        if host != "0.0.0.0":
-            server_config.host = host
-        if port != 10400:
-            server_config.port = port
-        if device != "NPU":
-            server_config.default_device = device
     else:
-        server_config = WakewordServerConfig(
-            host=host,
-            port=port,
-            log_level=log_level,
-            default_device=device,
-            default_cutoff=cutoff,
-            default_refractory=refractory,
-        )
+        server_config = WakewordServerConfig()
 
-    # 3. 合并命令行中指定的唤醒词模型
+    # 3. 统一合并命令行显式指定的参数 (命令行优先级高于配置文件)
+    if host is not None:
+        server_config.host = host
+    if port is not None:
+        server_config.port = port
+    if log_level is not None:
+        server_config.log_level = log_level.upper()
+    if device is not None:
+        server_config.default_device = device
+    if cutoff is not None:
+        server_config.default_cutoff = cutoff
+    if refractory is not None:
+        server_config.default_refractory = refractory
+    if melspec_model is not None:
+        server_config.melspec_model_path = melspec_model
+    if embedding_model is not None:
+        server_config.embedding_model_path = embedding_model
+
+    # 4. 统一使最终确定的日志级别生效 (保证配置文件或命令行指定的 log_level 绝对生效)
+    configure_logging(server_config.log_level)
+    logger.debug("日志级别已生效并设置为: %s", server_config.log_level)
+
+    # 5. 合并命令行中指定的唤醒词模型
     if model:
         for m_path in model:
             base_name = Path(m_path).stem
@@ -861,17 +959,26 @@ def main(
                 name=clean_name,
                 model_path=m_path,
                 phrase=clean_name.replace("_", " ").title(),
-                cutoff=cutoff,
-                refractory=refractory,
-                device=device,
+                cutoff=cutoff,         # 若命令行指定则使用，否则为 None (动态继承全局 default_cutoff)
+                refractory=refractory, # 若命令行指定则使用，否则为 None (动态继承全局 default_refractory)
+                device=device,         # 若命令行指定则使用，否则为 None (动态继承全局 default_device)
             )
-            server_config.models.append(entry)
+            # 若配置中已存在同名模型，替换已有项；否则追加
+            existing_idx = next(
+                (i for i, m in enumerate(server_config.models) if m.name == clean_name),
+                None,
+            )
+            if existing_idx is not None:
+                logger.info("命令行指定的模型 '%s' 覆盖配置文件中的同名模型", clean_name)
+                server_config.models[existing_idx] = entry
+            else:
+                server_config.models.append(entry)
 
-    # 4. 合并指定目录下扫描到的模型
+    # 6. 合并指定目录下扫描到的模型
     if model_dir and model_dir.is_dir():
         logger.info("正在扫描目录下的模型文件: %s", model_dir)
         for ext in ("*.onnx", "*.tflite", "*.xml"):
-            for file_p in model_dir.glob(ext):
+            for file_p in sorted(model_dir.glob(ext)):
                 # 排除基础特征提取模型 (如 melspectrogram / embedding_model)
                 if file_p.stem.startswith("melspectrogram") or file_p.stem.startswith("embedding_model"):
                     continue

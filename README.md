@@ -217,6 +217,9 @@ python test_wakeword.py sample.wav --server 127.0.0.1:10400
 | `--refractory` | | `2.0` | 默认唤醒冷却时间 (秒) |
 | `--port` | `-p` | `10400` | 服务监听端口 (HA Wyoming openWakeWord 官方端口 10400) |
 | `--host` | | `0.0.0.0` | 监听地址 |
+| `--log-level` | | `INFO` | 日志级别 (`DEBUG` / `INFO` / `WARNING` / `ERROR`) |
+| `--melspec-model` | | `None` | MelSpectrogram 特征模型路径（可选） |
+| `--embedding-model` | | `None` | Embedding 特征模型路径（可选） |
 
 ---
 
