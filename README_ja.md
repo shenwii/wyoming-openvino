@@ -47,7 +47,8 @@ wyoming-openvino/
 │   ├── i18n.py               # 国際化エンジン
 │   ├── lang/                 # 言語カタログ (en.json, zh.json, ja.json, ko.json)
 │   ├── requirements.txt      # TTS 依存パッケージ
-│   └── Dockerfile            # マルチステージビルドコンテナ定義
+│   ├── Dockerfile            # 軽量コンテナ定義 (デフォルト、PyTorch なし)
+│   └── Dockerfile.torch      # PyTorch サポート付きコンテナ定義
 │
 ├── wyoming-wakeword/         # ウェイクワードサービス (openWakeWord OpenVINO)
 │   ├── wyoming-wakeword.py   # Python サービススクリプト
@@ -115,8 +116,11 @@ pip install -r requirements.txt
 # STT イメージのビルド
 docker build -t wyoming-stt ./wyoming-stt
 
-# TTS イメージのビルド (pyopenjtalk をマルチステージで自動コンパイル)
+# TTS イメージのビルド (デフォルト軽量版、PyTorch なし、約 2GB 削減)
 docker build -t wyoming-tts ./wyoming-tts
+
+# または PyTorch サポート付き TTS イメージのビルド (.pt 形式の音声重み直接読み込み用)
+docker build -f ./wyoming-tts/Dockerfile.torch -t wyoming-tts:torch ./wyoming-tts
 
 # Wake Word イメージのビルド
 docker build -t wyoming-wakeword ./wyoming-wakeword

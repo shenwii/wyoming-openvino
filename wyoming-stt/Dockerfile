@@ -2,11 +2,6 @@ FROM docker.io/openvino/ubuntu24_runtime:latest
 
 USER root
 
-# Install pip and system utilities
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-pip \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 # Install Python dependencies

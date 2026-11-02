@@ -47,7 +47,8 @@ wyoming-openvino/
 │   ├── i18n.py               # 국제화 엔진
 │   ├── lang/                 # 언어 카탈로그 (en.json, zh.json, ja.json, ko.json)
 │   ├── requirements.txt      # TTS 의존성 목록
-│   └── Dockerfile            # 다단계 빌드 컨테이너 정의
+│   ├── Dockerfile            # 경량 컨테이너 정의 (기본, PyTorch 없음)
+│   └── Dockerfile.torch      # PyTorch 지원 컨테이너 정의
 │
 ├── wyoming-wakeword/         # 호출어 서비스 (openWakeWord OpenVINO)
 │   ├── wyoming-wakeword.py   # Python 서비스 스크립트
@@ -115,8 +116,11 @@ pip install -r requirements.txt
 # STT 이미지 빌드
 docker build -t wyoming-stt ./wyoming-stt
 
-# TTS 이미지 빌드 (다단계 빌드로 pyopenjtalk 자동 컴파일)
+# TTS 이미지 빌드 (기본 경량 버전, PyTorch 없음, 약 2GB 절약)
 docker build -t wyoming-tts ./wyoming-tts
+
+# 또는 PyTorch 지원 TTS 이미지 빌드 (.pt 형식 음성 가중치 직접 로딩용)
+docker build -f ./wyoming-tts/Dockerfile.torch -t wyoming-tts:torch ./wyoming-tts
 
 # Wake Word 이미지 빌드
 docker build -t wyoming-wakeword ./wyoming-wakeword

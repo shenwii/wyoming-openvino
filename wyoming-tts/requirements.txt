@@ -8,10 +8,10 @@ wyoming>=1.5.0
 # Intel OpenVINO core inference engine
 openvino>=2024.0
 
-# PyTorch (for parsing Kokoro voice weight tensors)
+# PyTorch (Optional: only needed for loading complex .pt voice weights; excluded in lightweight build)
 torch
 
-# Kokoro TTS frontend & multilingual support
+# Kokoro TTS frontend & multilingual support (kokoro is optional; fallback to misaki when absent)
 kokoro>=0.8.4
 misaki[en,ja,zh]>=0.4.0
 
