@@ -119,7 +119,9 @@ class WakewordServerConfig:
     default_cutoff: float = 0.5
     default_refractory: float = 2.0
     melspec_model_path: Optional[str] = None
+    melspec_device: Optional[str] = None
     embedding_model_path: Optional[str] = None
+    embedding_device: Optional[str] = None
     models: List[SingleModelConfig] = field(default_factory=list)
 
 
@@ -381,16 +383,17 @@ class AudioFeaturePipeline:
         melspec_path: Union[str, Path],
         embedding_path: Union[str, Path],
         default_device: str = "NPU",
+        melspec_device: Optional[str] = None,
+        embedding_device: Optional[str] = None,
     ) -> None:
         logger.info("正在初始化特征提取流水线...")
 
         # 1. 编译 MelSpectrogram 模型: 输入 [1, 1280] float32
-        # MelSpectrogram 属于极轻量的 DSP/FFT 频域转换 (耗时 <0.1ms)，在 CPU 上执行稳定性最高且编译极快
-        # 若在 NPU 上编译易因复杂频域算子导致 Level-Zero 驱动挂起或超时
-        melspec_dev = "CPU" if "NPU" in default_device.upper() else default_device
+        # 遵循设备优先级 (默认优先请求 NPU -> GPU -> CPU 自动回退)
+        target_melspec_dev = melspec_device or default_device
         self.melspec_model, self.melspec_device = runner.compile_model_safe(
             model_path=melspec_path,
-            requested_device=melspec_dev,
+            requested_device=target_melspec_dev,
             static_shape=[1, CHUNK_SAMPLES],
         )
 
@@ -405,9 +408,10 @@ class AudioFeaturePipeline:
                 break
 
         self.emb_shape = emb_shape
+        target_embedding_dev = embedding_device or default_device
         self.embedding_model, self.embedding_device = runner.compile_model_safe(
             model_path=embedding_path,
-            requested_device=default_device,
+            requested_device=target_embedding_dev,
             static_shape=emb_shape,
         )
 
@@ -477,6 +481,8 @@ class WakeWordEngine:
                 melspec_path=melspec_p,
                 embedding_path=embedding_p,
                 default_device=config.default_device,
+                melspec_device=config.melspec_device,
+                embedding_device=config.embedding_device,
             )
 
         # 加载所有唤醒词模型
@@ -802,7 +808,9 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
     )
 
     melspec_model = feat_sec.get("melspec_model") or raw_dict.get("melspec_model")
+    melspec_device = feat_sec.get("melspec_device") or raw_dict.get("melspec_device")
     embedding_model = feat_sec.get("embedding_model") or raw_dict.get("embedding_model")
+    embedding_device = feat_sec.get("embedding_device") or raw_dict.get("embedding_device")
 
     cfg = WakewordServerConfig(
         host=str(host),
@@ -812,7 +820,9 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         default_cutoff=default_cutoff,
         default_refractory=default_refractory,
         melspec_model_path=str(melspec_model) if melspec_model else None,
+        melspec_device=str(melspec_device) if melspec_device else None,
         embedding_model_path=str(embedding_model) if embedding_model else None,
+        embedding_device=str(embedding_device) if embedding_device else None,
     )
 
     raw_models = raw_dict.get("models") or []

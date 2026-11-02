@@ -23,6 +23,7 @@ default_refractory: 2.0 # 默认触发后的防重复冷却时间 (秒)
 # 若留空或未配置，服务会自动在本地 models 目录、openwakeword 模块或 GitHub Release 中定位/下载
 feature_models:
   melspec_model: "models/melspectrogram.onnx"
+  # melspec_device: "NPU" # 可选: 若不配置则默认跟随 default_device (遵循 NPU -> GPU -> CPU 自动回退)
   embedding_model: "models/embedding_model.onnx"
 
 # --- 唤醒词多模型列表 (支持同时监听多个唤醒词) ---
