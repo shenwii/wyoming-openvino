@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-openWakeWord 模型训练、评估与 NPU 优化 ONNX 导出器 (train.py)
-=============================================================
-1. 特征提取管线:
-   利用 openWakeWord 官方 melspectrogram.onnx 与 embedding_model.onnx，
-   将增强后的正负向音频统一抽取为 96 维语音嵌入特征流。
-2. 负样本融合:
-   深度融合 TTS NG 干扰词 (Hard Negatives) 与 ACAV100M 2000 小时负样本特征。
-3. 神经网络分类器训练:
-   训练与 openWakeWord 规范完全一致的 DNN 判别网络。
-4. NPU 专属优化导出:
-   - 导出为纯静态形状 [1, 16, 96] -> [1, 1]
-   - 纯净 Gemm + ReLU + Sigmoid 算子图，OpenVINO VPUX 编译器 100% 硬件编译加速
-   - 彻底避免动态 Shape 导致 NPU 崩溃或回退 CPU
+openWakeWord model training, evaluation, and NPU-optimized ONNX exporter (train.py).
+=============================================================================
+1. Feature extraction pipeline:
+   Uses openWakeWord official melspectrogram.onnx and embedding_model.onnx to extract
+   96-dim speech embeddings from augmented positive and negative audio.
+   Supports hardware acceleration via OpenVINO (CPU or Intel GPU).
+2. Negative sample blending:
+   Fuses synthetic hard negatives with ACAV100M 2000-hour negative audio features.
+3. Neural network training:
+   Trains a standard openWakeWord DNN classifier on CPU, CUDA, or Intel GPU (PyTorch XPU).
+4. Intel NPU dedicated optimization export:
+   - Pure static shape [1, 16, 96] -> [1, 1]
+   - Pure Gemm + ReLU + Sigmoid computation graph for 100% NPU hardware acceleration
+   - Eliminates dynamic shape compilation crashes and CPU fallback
 """
 
 import argparse
@@ -34,7 +35,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import yaml
 
-# 尝试导入 onnx 与推理引擎
+from i18n import t
+
+# Optional onnx and inference runtimes
 try:
     import onnx
 except ImportError:
@@ -56,25 +59,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger("train_wakeword")
 
-# 常量定义 (严格与 openWakeWord 及 wyoming-wakeword.py 对齐)
-CHUNK_SAMPLES = 1280       # 80ms 采样点 (16000 * 0.08)
-MEL_HISTORY_FRAMES = 76    # 嵌入模型所需梅尔帧数
-EMBEDDING_DIM = 96         # 语音嵌入向量维度
-DEFAULT_CONTEXT_LEN = 16   # 滑动上下文窗口数 (16 * 80ms = 1.28秒)
+# Constants aligned with openWakeWord and wyoming-wakeword
+CHUNK_SAMPLES = 1280       # 80ms frame (16000 * 0.08)
+MEL_HISTORY_FRAMES = 76    # History frames required by embedding model
+EMBEDDING_DIM = 96         # Speech embedding vector dimension
+DEFAULT_CONTEXT_LEN = 16   # Context window frames (16 * 80ms = 1.28s)
 
 
 # ==============================================================================
-# 特征提取流水线 (Feature Extraction)
+# Hardware Device Resolvers
+# ==============================================================================
+def resolve_torch_device(requested: str = "auto") -> torch.device:
+    """
+    Resolve PyTorch training device.
+    Supports 'auto', 'cpu', 'cuda', and 'xpu' (Intel Arc / Core Ultra GPU via PyTorch 2.4+ / IPEX).
+    """
+    req = str(requested).lower().strip()
+    if req == "auto":
+        # 1. Check Intel GPU (PyTorch 2.4+ native XPU backend or IPEX)
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return torch.device("xpu")
+        # 2. Check NVIDIA GPU (CUDA)
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        # 3. Fallback to CPU
+        return torch.device("cpu")
+    elif req in ("xpu", "intel", "intel_gpu"):
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return torch.device("xpu")
+        logger.warning("Intel XPU requested but torch.xpu is not available. Falling back to CPU.")
+        return torch.device("cpu")
+    elif req == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        logger.warning("CUDA requested but not available. Falling back to CPU.")
+        return torch.device("cpu")
+    else:
+        return torch.device(req)
+
+
+# ==============================================================================
+# Feature Extraction Pipeline
 # ==============================================================================
 class FeatureExtractor:
-    """基于 ONNX 的 openWakeWord 音频特征提取管道。"""
+    """Audio feature extraction pipeline using openWakeWord base ONNX models."""
 
-    def __init__(self, models_dir: Path) -> None:
+    def __init__(self, models_dir: Path, requested_device: str = "auto") -> None:
         self.models_dir = models_dir
         melspec_p = models_dir / "melspectrogram.onnx"
         embedding_p = models_dir / "embedding_model.onnx"
 
-        # 降级检查
+        # Check parent models directory
         if not melspec_p.exists():
             parent_melspec = Path(__file__).resolve().parent.parent / "models" / "melspectrogram.onnx"
             if parent_melspec.exists():
@@ -87,14 +122,25 @@ class FeatureExtractor:
 
         if not melspec_p.exists() or not embedding_p.exists():
             raise FileNotFoundError(
-                f"未能找到 openWakeWord 基础特征模型:\n"
-                f"  melspectrogram: {melspec_p} (存在: {melspec_p.exists()})\n"
-                f"  embedding_model: {embedding_p} (存在: {embedding_p.exists()})\n"
-                f"请先运行 'python setup_libs.py' 自动下载基础模型。"
+                t("train.extractor_missing", mel=melspec_p, emb=embedding_p)
             )
 
-        # 优先使用 onnxruntime，无则使用 openvino
-        if ort is not None:
+        req_dev = str(requested_device).upper().strip()
+        self.actual_device = "CPU"
+
+        # Prefer OpenVINO if GPU requested or available; otherwise onnxruntime or openvino
+        if ov is not None and (req_dev in ("GPU", "AUTO") or ort is None):
+            core = ov.Core()
+            if req_dev in ("GPU", "AUTO") and "GPU" in core.available_devices:
+                self.actual_device = "GPU"
+            else:
+                self.actual_device = "CPU"
+
+            self.melspec_session = core.compile_model(core.read_model(str(melspec_p)), self.actual_device)
+            self.emb_session = core.compile_model(core.read_model(str(embedding_p)), self.actual_device)
+            self.backend = "openvino"
+            emb_shape = self.emb_session.inputs[0].get_partial_shape()
+        elif ort is not None:
             opts = ort.SessionOptions()
             opts.inter_op_num_threads = 1
             opts.intra_op_num_threads = 2
@@ -110,9 +156,8 @@ class FeatureExtractor:
             self.backend = "openvino"
             emb_shape = self.emb_session.inputs[0].get_partial_shape()
         else:
-            raise RuntimeError("请安装 onnxruntime 或 openvino 以进行特征提取 (pip install onnxruntime)。")
+            raise RuntimeError("Please install onnxruntime or openvino (pip install onnxruntime openvino).")
 
-        # 适配 embedding 模型输入维度: [1, 76, 32, 1] 或 [1, 1, 76, 32]
         self.emb_shape = [1, MEL_HISTORY_FRAMES, 32, 1]
         try:
             if len(emb_shape) == 4 and (emb_shape[1] == 1 or str(emb_shape[1]) == "1"):
@@ -120,14 +165,8 @@ class FeatureExtractor:
         except Exception:
             pass
 
-        logger.info("✅ 特征提取管道初始化就绪 (后端: %s, 嵌入形状: %s)", self.backend, self.emb_shape)
-
     def extract_features_from_audio(self, audio_16k: np.ndarray) -> np.ndarray:
-        """
-        从单条 16kHz 音频中抽取 96 维嵌入特征序列。
-        返回: (N_frames, 96) 的 numpy 矩阵。
-        """
-        # 补齐或截取为 CHUNK_SAMPLES 整数倍
+        """Extract 96-dimensional embedding sequence from a 16kHz audio array."""
         num_chunks = len(audio_16k) // CHUNK_SAMPLES
         if num_chunks == 0:
             return np.empty((0, EMBEDDING_DIM), dtype=np.float32)
@@ -148,7 +187,6 @@ class FeatureExtractor:
             for f in mel_frame:
                 mel_history.append(f)
 
-            # 当累积满 76 帧梅尔频谱时，抽取一次 96 维特征
             if len(mel_history) >= MEL_HISTORY_FRAMES:
                 history_window = np.array(mel_history[-MEL_HISTORY_FRAMES:], dtype=np.float32).reshape(self.emb_shape)
                 if self.backend == "onnxruntime":
@@ -164,16 +202,15 @@ class FeatureExtractor:
 
 
 # ==============================================================================
-# NPU 极致优化神经网络模型定义 (PyTorch)
+# NPU-Optimized Neural Network Model (PyTorch)
 # ==============================================================================
 class NPUOptimizedWakeWordDNN(nn.Module):
     """
-    针对 Intel NPU (OpenVINO VPUX) 深度优化的紧凑型唤醒词分类器。
-    
-    特点:
-      - 纯净 Gemm + ReLU + Sigmoid 计算拓扑，无动态算子与分支
-      - 训练阶段包含 Dropout 以提升防过拟合泛化性
-      - 导出 ONNX 时自动剔除 Dropout，转换为纯粹的静态权值矩阵乘加
+    Compact feedforward wake word classifier optimized for Intel NPU (OpenVINO VPUX).
+    Topological features:
+      - Pure Gemm + ReLU + Sigmoid computation graph
+      - Static shape [1, 16, 96] -> [1, 1]
+      - Dropout used during training, folded out during ONNX export
     """
 
     def __init__(self, context_length: int = 16, embedding_dim: int = 96, layer_size: int = 64, dropout: float = 0.1) -> None:
@@ -195,7 +232,6 @@ class NPUOptimizedWakeWordDNN(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 输入 x: [Batch, context_length, 96]
         h = self.flatten(x)
         h = self.drop1(self.relu1(self.fc1(h)))
         h = self.drop2(self.relu2(self.fc2(h)))
@@ -204,15 +240,10 @@ class NPUOptimizedWakeWordDNN(nn.Module):
 
 
 # ==============================================================================
-# 唤醒词训练数据集加载器 (PyTorch Dataset)
+# Dataset Loader
 # ==============================================================================
 class WakeWordDataset(Dataset):
-    """
-    综合数据集:
-      - 正样本 (来自增强后的正向音频末尾窗口)
-      - 负样本 A (来自增强后的 NG 干扰词所有窗口)
-      - 负样本 B (来自 ACAV100M 2000 小时日常环境与语音预计算特征)
-    """
+    """Wake word training dataset combining positive, synthetic negative, and ACAV100M features."""
 
     def __init__(
         self,
@@ -225,16 +256,13 @@ class WakeWordDataset(Dataset):
         self.context_len = context_len
         self.samples_per_epoch = samples_per_epoch
 
-        # 构建正样本窗口
         self.pos_windows = []
         for feat in positive_features:
             if len(feat) >= context_len:
-                # 截取音频尾部最后几个有效窗口 (唤醒词说完整时刻)
                 self.pos_windows.append(feat[-context_len:])
                 if len(feat) >= context_len + 1:
                     self.pos_windows.append(feat[-(context_len + 1) : -1])
 
-        # 构建 NG 负样本窗口
         self.neg_windows = []
         for feat in negative_features:
             if len(feat) >= context_len:
@@ -245,27 +273,26 @@ class WakeWordDataset(Dataset):
         self.has_acav = acav_mmap is not None and len(acav_mmap) > context_len
 
         logger.info(
-            "📊 数据集构建完成: 正样本窗口 %d 个, NG负样本窗口 %d 个, ACAV100M 特征可用: %s",
-            len(self.pos_windows),
-            len(self.neg_windows),
-            self.has_acav,
+            t(
+                "train.dataset_stats",
+                pos=len(self.pos_windows),
+                neg=len(self.neg_windows),
+                acav=self.has_acav,
+            )
         )
 
     def __len__(self) -> int:
         return self.samples_per_epoch
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        # 50% 概率采样正样本，50% 概率采样负样本
         if random.random() < 0.5 and len(self.pos_windows) > 0:
             window = random.choice(self.pos_windows)
             label = 1.0
         else:
-            # 负样本: 50% 概率采自 NG 干扰词, 50% 概率采自 ACAV100M
             if self.has_acav and (len(self.neg_windows) == 0 or random.random() < 0.6):
                 max_start = len(self.acav_mmap) - self.context_len - 1
                 start = random.randint(0, max_start)
                 window = self.acav_mmap[start : start + self.context_len]
-                # 若 ACAV100M 存储为 16-bit 整型，需反归一化为 float32
                 if window.dtype == np.int16:
                     window = window.astype(np.float32) / 32768.0
             else:
@@ -276,7 +303,7 @@ class WakeWordDataset(Dataset):
 
 
 # ==============================================================================
-# 离线特征抽取与缓存构建
+# Feature Extraction and Caching
 # ==============================================================================
 def extract_and_cache_features(
     audio_dir: Path,
@@ -284,14 +311,14 @@ def extract_and_cache_features(
     cache_path: Path,
     desc: str,
 ) -> List[np.ndarray]:
-    """批量抽取目录下所有 WAV 文件的特征并序列化缓存，避免反复计算。"""
+    """Batch extract features from all WAV files in directory and cache to disk."""
     if cache_path.exists():
-        logger.info("发现已有特征缓存，正在直接加载: %s", cache_path.name)
+        logger.info(t("train.cache_found", name=cache_path.name))
         data = np.load(str(cache_path), allow_pickle=True)
         return list(data)
 
     wav_files = sorted(list(audio_dir.glob("*.wav")))
-    logger.info("正在抽取 [%s] 特征 (共 %d 个音频)...", desc, len(wav_files))
+    logger.info(t("train.extracting_features", desc=desc, count=len(wav_files)))
 
     features_list = []
     count = 0
@@ -305,19 +332,19 @@ def extract_and_cache_features(
                 features_list.append(feats)
                 count += 1
             if count % 100 == 0:
-                print(f"\r  -> 已抽取 {count}/{len(wav_files)} 个音频特征", end="", flush=True)
+                print(f"\r  {t('train.feature_progress', count=count, total=len(wav_files))}", end="", flush=True)
         except Exception as e:
-            logger.debug("抽取音频 %s 异常: %s", w.name, e)
+            logger.debug(f"Error extracting {w.name}: {e}")
 
     print()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(str(cache_path), np.array(features_list, dtype=object), allow_pickle=True)
-    logger.info("✅ [%s] 特征抽取完成并保存至: %s (有效 %d 条)", desc, cache_path, len(features_list))
+    logger.info(t("train.feature_saved", desc=desc, path=cache_path, count=len(features_list)))
     return features_list
 
 
 # ==============================================================================
-# 模型验证 (FAPH 误唤醒率与召回率评估)
+# Model Evaluation
 # ==============================================================================
 def evaluate_model(
     model: nn.Module,
@@ -326,15 +353,10 @@ def evaluate_model(
     context_len: int = 16,
     cutoff: float = 0.5,
 ) -> Tuple[float, float]:
-    """
-    评估模型表现:
-      - 召回率 (Recall / True Positive Rate)
-      - 每小时误报次数估算 (False Alarms Per Hour, FAPH)
-    """
+    """Evaluate recall and estimated False Alarms Per Hour (FAPH)."""
     model.eval()
     device = next(model.parameters()).device
 
-    # 1. 计算召回率
     pos_correct = 0
     pos_total = 0
     with torch.no_grad():
@@ -348,16 +370,13 @@ def evaluate_model(
 
     recall = (pos_correct / pos_total) if pos_total > 0 else 0.0
 
-    # 2. 计算 FAPH (在验证集特征上滑动)
     false_positives = 0
     total_hours = 0.0
 
     if val_neg_mmap is not None and len(val_neg_mmap) > context_len:
         total_frames = len(val_neg_mmap)
-        # 每帧 80ms = 0.08s
         total_hours = (total_frames * 0.08) / 3600.0
 
-        # 以步长 1 滑动测试 (为了加速测试每 4 帧测试一次)
         stride = 4
         with torch.no_grad():
             for i in range(0, total_frames - context_len, stride):
@@ -369,7 +388,7 @@ def evaluate_model(
                 if pred >= cutoff:
                     false_positives += 1
 
-        faph = (false_positives * (stride)) / total_hours if total_hours > 0 else 0.0
+        faph = (false_positives * stride) / total_hours if total_hours > 0 else 0.0
     else:
         faph = 0.0
 
@@ -377,7 +396,7 @@ def evaluate_model(
 
 
 # ==============================================================================
-# NPU 专属 ONNX 导出与验证
+# NPU ONNX Export
 # ==============================================================================
 def export_npu_optimized_onnx(
     model: nn.Module,
@@ -386,19 +405,14 @@ def export_npu_optimized_onnx(
     embedding_dim: int = 96,
     opset: int = 17,
 ) -> bool:
-    """
-    导出针对 Intel NPU (OpenVINO VPUX 编译器) 极致优化的纯静态 ONNX 模型。
-    静态形状: [1, 16, 96] -> [1, 1]
-    """
+    """Export static ONNX model optimized for Intel NPU."""
     model.eval()
     dummy_input = torch.zeros(1, context_length, embedding_dim, dtype=torch.float32)
 
     output_onnx_path.parent.mkdir(parents=True, exist_ok=True)
     temp_onnx = output_onnx_path.with_suffix(".tmp.onnx")
 
-    logger.info("正在导出 NPU 优化 ONNX 模型: %s ...", output_onnx_path.name)
-    logger.info("  - 强制静态输入形状: [1, %d, %d]", context_length, embedding_dim)
-    logger.info("  - ONNX Opset: %d", opset)
+    logger.info(t("train.exporting_onnx", path=output_onnx_path.name))
 
     try:
         torch.onnx.export(
@@ -409,17 +423,14 @@ def export_npu_optimized_onnx(
             output_names=["output"],
             opset_version=opset,
             do_constant_folding=True,
-            # 不设置 dynamic_axes 以保持纯静态形状，对 NPU 驱动最为稳健
-            dynamic_axes=None,
+            dynamic_axes=None,  # Strictly static for NPU driver stability
         )
 
-        # 校验 ONNX 合法性
         if onnx is not None:
             onnx_model = onnx.load(str(temp_onnx))
             onnx.checker.check_model(onnx_model)
-            logger.info("✅ ONNX 结构校验通过 (无悬挂节点与动态形状)")
+            logger.info(t("train.onnx_verified"))
 
-        # 验证数值正确性 (PyTorch vs ONNXRuntime / OpenVINO)
         test_inp = np.random.randn(1, context_length, embedding_dim).astype(np.float32)
         with torch.no_grad():
             torch_out = model(torch.from_numpy(test_inp)).cpu().numpy()
@@ -428,29 +439,30 @@ def export_npu_optimized_onnx(
             sess = ort.InferenceSession(str(temp_onnx), providers=["CPUExecutionProvider"])
             ort_out = sess.run(None, {"input": test_inp})[0]
             np.testing.assert_allclose(torch_out, ort_out, rtol=1e-3, atol=1e-4)
-            logger.info("✅ ONNXRuntime 推理数值与 PyTorch 完全一致")
+            logger.info(t("train.onnx_numerical_match"))
 
         temp_onnx.rename(output_onnx_path)
-        logger.info("🎉 成功导出最终 NPU 唤醒词模型: %s (大小: %.2f KB)", output_onnx_path, output_onnx_path.stat().st_size / 1024)
+        logger.info(t("train.export_success", path=output_onnx_path, size=output_onnx_path.stat().st_size / 1024))
         return True
 
     except Exception as exc:
-        logger.error("❌ 导出 ONNX 发生异常: %s", exc)
+        logger.error(t("train.export_failed", error=str(exc)))
         if temp_onnx.exists():
             temp_onnx.unlink()
         return False
 
 
 # ==============================================================================
-# 主训练调度入口
+# Main Training Function
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="训练 openWakeWord 唤醒词并导出 NPU 优化 ONNX 模型")
-    parser.add_argument("--config", default="config.yaml", help="配置文件路径 (默认: config.yaml)")
-    parser.add_argument("--steps", type=int, default=None, help="覆盖配置文件的训练迭代步数")
-    parser.add_argument("--batch-size", type=int, default=None, help="覆盖批大小")
-    parser.add_argument("--lr", type=float, default=None, help="覆盖学习率")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="PyTorch 训练设备")
+    parser = argparse.ArgumentParser(description=t("cli.train_help"))
+    parser.add_argument("--config", default="config.yaml", help="Path to config file [default: config.yaml]")
+    parser.add_argument("--steps", type=int, default=None, help="Override training steps")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
+    parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
+    parser.add_argument("--device", default=None, help="PyTorch training device (auto, cpu, cuda, xpu)")
+    parser.add_argument("--feature-device", default=None, help="Feature extraction device (auto, CPU, GPU)")
     args = parser.parse_args()
 
     cfg_path = Path(args.config).resolve()
@@ -464,7 +476,14 @@ def main():
     data_dir = (base_dir / cfg["data"].get("data_dir", "./data")).resolve()
     train_cfg = cfg["training"]
 
-    model_name = train_cfg.get("model_name", "my_wakeword")
+    # Model name prioritization: wakeword.friend_name -> wakeword.friendly_name -> training.model_name
+    model_name = (
+        cfg.get("wakeword", {}).get("friend_name")
+        or cfg.get("wakeword", {}).get("friendly_name")
+        or train_cfg.get("model_name")
+        or "my_wakeword"
+    )
+
     context_length = int(train_cfg.get("context_length", DEFAULT_CONTEXT_LEN))
     embedding_dim = int(train_cfg.get("embedding_dim", EMBEDDING_DIM))
     layer_size = int(train_cfg.get("layer_size", 64))
@@ -475,60 +494,66 @@ def main():
     npu_cfg = train_cfg.get("npu_optimization", {})
     opset = int(npu_cfg.get("onnx_opset", 17))
 
+    # Resolve training and feature extraction hardware devices
+    train_dev_req = args.device or train_cfg.get("device", "auto")
+    train_device = resolve_torch_device(train_dev_req)
+
+    feat_dev_req = args.feature_device or train_cfg.get("feature_device", "auto")
+
     output_dir = (base_dir / train_cfg.get("output_dir", "./output")).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     final_onnx_path = output_dir / f"{model_name}.onnx"
 
     print("======================================================================")
-    print("🧠 openWakeWord 唤醒词模型训练与 NPU 优化导出")
-    print(f"   - 目标模型名称: {model_name}")
-    print(f"   - 上下文窗口: {context_length} 帧 (约 {context_length * 0.08:.2f} 秒)")
-    print(f"   - 隐藏单元: {layer_size} | 训练步数: {steps} | 批大小: {batch_size}")
-    print(f"   - 训练设备: {args.device.upper()}")
-    print(f"   - 产物输出路径: {final_onnx_path}")
+    print(t("train.header_title"))
+    print(t("train.target_model", name=model_name))
+    print(t("train.context_window", window=context_length, sec=context_length * 0.08))
+    print(t("train.hyperparams", units=layer_size, steps=steps, batch_size=batch_size))
+    print(t("train.training_device", device=str(train_device).upper()))
+    print(t("train.output_path", path=final_onnx_path))
     print("======================================================================")
 
-    # 1. 初始化特征提取器
+    # 1. Initialize feature extractor
     models_dir = (base_dir / "lib" / "models").resolve()
-    extractor = FeatureExtractor(models_dir=models_dir)
+    extractor = FeatureExtractor(models_dir=models_dir, requested_device=feat_dev_req)
+    print(t("train.feature_device", device=f"{extractor.backend.upper()} [{extractor.actual_device}]"))
 
-    # 2. 抽取并加载正向与 NG 负向特征
+    # 2. Extract and load positive and hard negative features
     aug_pos_dir = data_dir / "augmented" / "positive"
     aug_neg_dir = data_dir / "augmented" / "negative"
 
     if not aug_pos_dir.exists() or len(list(aug_pos_dir.glob("*.wav"))) == 0:
-        logger.warning("未在 %s 发现增强后的正样本，尝试使用原始合成音频...", aug_pos_dir)
         aug_pos_dir = data_dir / "synthetic_speech" / "positive"
 
     if not aug_neg_dir.exists() or len(list(aug_neg_dir.glob("*.wav"))) == 0:
         aug_neg_dir = data_dir / "synthetic_speech" / "negative"
 
     cache_dir = data_dir / "features_cache"
-    pos_features = extract_and_cache_features(aug_pos_dir, extractor, cache_dir / "pos_feats.npy", "正样本唤醒词")
-    neg_features = extract_and_cache_features(aug_neg_dir, extractor, cache_dir / "neg_feats.npy", "NG负向干扰词") if aug_neg_dir.exists() else []
+    pos_features = extract_and_cache_features(aug_pos_dir, extractor, cache_dir / "pos_feats.npy", "positive")
+    neg_features = extract_and_cache_features(aug_neg_dir, extractor, cache_dir / "neg_feats.npy", "negative") if aug_neg_dir.exists() else []
 
-    # 3. 尝试内存映射加载 ACAV100M 负样本特征
+    # 3. Memory map ACAV100M negative features
     acav_path = data_dir / "negative_features" / "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
     acav_mmap = None
     if acav_path.exists():
         try:
-            logger.info("正在建立 ACAV100M 2000 小时负样本内存映射: %s", acav_path.name)
+            logger.info(t("train.acav_loading", name=acav_path.name))
             acav_mmap = np.load(str(acav_path), mmap_mode="r")
-            logger.info("✅ ACAV100M 负样本映射成功 (共 %d 帧特征)", len(acav_mmap))
+            logger.info(t("train.acav_mapped", count=len(acav_mmap)))
         except Exception as e:
-            logger.warning("加载 ACAV100M 失败: %s，将依赖 NG 干扰词进行负样本训练", e)
+            logger.warning(t("train.acav_failed", error=str(e)))
 
-    # 4. 加载验证集特征
+    # 4. Load validation set features
     val_path = data_dir / "negative_features" / "validation_set_features.npy"
     val_mmap = None
     if val_path.exists():
         try:
             val_mmap = np.load(str(val_path), mmap_mode="r")
-            logger.info("✅ 假阳性评估验证集加载成功 (共 %d 帧)", len(val_mmap))
+            logger.info(t("train.validation_loaded", count=len(val_mmap)))
         except Exception:
             pass
 
-    # 5. 构建 Dataset 与 DataLoader
+    # 5. Build Dataset and DataLoader
     dataset = WakeWordDataset(
         positive_features=pos_features,
         negative_features=neg_features,
@@ -542,26 +567,22 @@ def main():
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
-        pin_memory=(args.device == "cuda"),
+        pin_memory=(train_device.type in ("cuda", "xpu")),
     )
 
-    # 6. 初始化神经网络模型
+    # 6. Initialize neural network model
     model = NPUOptimizedWakeWordDNN(
         context_length=context_length,
         embedding_dim=embedding_dim,
         layer_size=layer_size,
         dropout=dropout,
-    ).to(args.device)
+    ).to(train_device)
 
-    # 损失函数 (加权 BCE 以加重负样本惩罚)
-    pos_weight = torch.tensor([1.0]).to(args.device)
-    criterion = nn.BCELoss()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
 
-    logger.info("🚀 开始模型训练迭代 (总步数: %d)...", steps)
+    logger.info(t("train.start_training", steps=steps))
     start_time = time.time()
-    step_count = 0
     running_loss = 0.0
 
     model.train()
@@ -574,15 +595,14 @@ def main():
             loader_iter = iter(loader)
             x_batch, y_batch = next(loader_iter)
 
-        x_batch = x_batch.to(args.device)
-        y_batch = y_batch.to(args.device)
+        x_batch = x_batch.to(train_device)
+        y_batch = y_batch.to(train_device)
 
         optimizer.zero_grad()
         preds = model(x_batch)
 
-        # 对负样本误差加大惩罚系数
         weights = torch.where(y_batch == 0.0, 2.5, 1.0)
-        loss = torch.mean(weights * ((preds - y_batch) ** 2))  # MSE 加权或 BCELoss
+        loss = torch.mean(weights * ((preds - y_batch) ** 2))
         loss.backward()
         optimizer.step()
         scheduler.step()
@@ -592,19 +612,22 @@ def main():
         if step % 200 == 0 or step == steps:
             avg_loss = running_loss / 200.0 if step % 200 == 0 else running_loss / (step % 200)
             running_loss = 0.0
-            print(f"\r  [Step {step:05d}/{steps}] 损失值: {avg_loss:.5f} | 学习率: {scheduler.get_last_lr()[0]:.6f}", end="", flush=True)
+            print(
+                f"\r  {t('train.step_progress', step=step, steps=steps, loss=avg_loss, lr=scheduler.get_last_lr()[0])}",
+                end="",
+                flush=True,
+            )
 
-        # 周期性评估与检查点
         if step % 2000 == 0 or step == steps:
             recall, faph = evaluate_model(model, pos_features, val_mmap, context_len=context_length, cutoff=0.5)
-            print(f"\n  📈 阶段验证 (Step {step}): 召回率 (Recall) = {recall * 100:.1f}%, 估计误报率 (FAPH) = {faph:.2f}次/小时")
+            print(f"\n  {t('train.val_stats', step=step, recall=recall * 100, faph=faph)}")
             model.train()
 
     print()
     elapsed = time.time() - start_time
-    logger.info("✅ 训练完成！耗时: %.1f 秒", elapsed)
+    logger.info(t("train.training_complete", elapsed=elapsed))
 
-    # 7. 导出针对 NPU 深度优化的纯静态 ONNX 模型
+    # 7. Export NPU static ONNX model
     export_npu_optimized_onnx(
         model=model,
         output_onnx_path=final_onnx_path,
@@ -613,7 +636,7 @@ def main():
         opset=opset,
     )
 
-    # 8. 写入模型元信息配置文件 (便于 wyoming-wakeword.py 直接引用)
+    # 8. Write model metadata JSON
     info_path = output_dir / f"{model_name}.json"
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -637,11 +660,11 @@ def main():
         )
 
     print("\n======================================================================")
-    print("🎉 恭喜！唤醒词模型训练与 NPU 优化导出圆满完成！")
-    print(f"   - ONNX 模型文件: {final_onnx_path}")
-    print(f"   - 模型配置文件: {info_path}")
-    print("💡 在 wyoming-wakeword.py 中启用此模型的命令:")
-    print(f"   python wyoming-wakeword.py --model {final_onnx_path} --device NPU --cutoff 0.55")
+    print(t("train.congrats_title"))
+    print(f"   - ONNX: {final_onnx_path}")
+    print(f"   - Metadata: {info_path}")
+    print(f"{t('train.wyoming_usage')}")
+    print(f"   python wyoming-wakeword/wyoming-wakeword.py --model {final_onnx_path} --device NPU --cutoff 0.55")
     print("======================================================================\n")
 
 

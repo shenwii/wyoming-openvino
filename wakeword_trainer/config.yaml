@@ -1,181 +1,182 @@
 # ==============================================================================
-# Wyoming / openWakeWord 模型训练与数据合成配置文件 (NPU 极致优化版)
+# Wyoming / openWakeWord Model Training & Data Synthesis Config (NPU Optimized)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. 唤醒词词汇定义 (Wake Word Definitions)
+# 1. Wake Word Definitions
 # ------------------------------------------------------------------------------
 wakeword:
-  # 目标主唤醒词 (将被标记为正样本 1.0)
-  # 支持中文 (如 "你好小智"、"小爱同学")、英文 (如 "hey jarvis")、日文等
-  phrase: "你好小智"
+  # Primary target wake word phrase (marked as positive sample 1.0)
+  # Supports English (e.g. "hey jarvis"), Chinese (e.g. "你好小智"), Japanese, etc.
+  phrase: "hey jarvis"
 
-  # 候补/变体唤醒词 (Positive Variants / Aliases)
-  # 同样会被标记为正样本 1.0，用于增强对多音字、轻微口音、同音异构或变体语气的识别容忍度
+  # Friendly model identifier without spaces (used for output model filename: {friend_name}.onnx)
+  # All primary user configurations are consolidated in this 'wakeword' block!
+  friend_name: "hey_jarvis_v1"
+
+  # Positive variant phrases / aliases (marked as positive sample 1.0)
+  # Enhances acoustic tolerance for accents, variations, and connected speech
   candidate_phrases:
-    - "小智小智"
-    - "嗨小智"
-    - "小智同学"
-    - "你好小志"
+    - "jarvis jarvis"
+    - "hi jarvis"
+    - "hello jarvis"
 
-  # NG 负唤醒词 / 近音词 / 干扰词 (Hard Negatives / Near Misses)
-  # 会被严格标记为负样本 0.0！
-  # 这是抑制误唤醒（False Accept）最核心的手段！请列出容易混淆的近音词、截断词、生活常见词。
+  # Hard negatives / near-miss phrases (strictly marked as negative sample 0.0)
+  # The most vital defense against false triggers! List confusable words and daily phrases.
   hard_negatives:
-    - "你好小夏"
-    - "你好小李"
-    - "你好小王"
-    - "你好"
-    - "你好啊"
-    - "小智"
-    - "小志"
-    - "下雪了"
-    - "小吃一条街"
-    - "注意安全"
-    - "天气预报"
-    - "开灯"
-    - "关灯"
+    - "hey harvest"
+    - "hey service"
+    - "hey artist"
+    - "jarvis"
+    - "harvest"
+    - "service"
+    - "turn on the lights"
+    - "turn off the lights"
+    - "what is the weather"
 
-  # 唤醒词语言代码 (用于自动挑选对应的 TTS 发音人与 G2P 音素前端)
-  # 可选: zh (中文), en (英语), ja (日语), es (西班牙语), fr (法语) 等
-  language: "zh"
+  # Language code for TTS voice selection and text frontend (e.g. en, zh, ja, es, fr)
+  language: "en"
 
 
 # ------------------------------------------------------------------------------
-# 2. 双引擎 TTS 合成数据生成配置 (Dual-Engine TTS Generation)
+# 2. Dual-Engine Synthetic Speech Generation (Kokoro OpenVINO + Edge-TTS)
 # ------------------------------------------------------------------------------
 tts:
-  # 合成音频输出目录
+  # Output directory for synthesized speech
   output_dir: "./data/synthetic_speech"
 
-  # 正样本生成目标总数 (由 Kokoro 和 Edge-TTS 协同分担生成)
-  # 建议: 测试验证 200~500 个；正式生产训练 2000~5000 个
+  # Target count for positive samples (split between Kokoro and Edge-TTS)
+  # Suggested: 200~500 for fast verification; 2000~5000 for production training
   target_positive_samples: 2000
 
-  # NG 负样本生成目标总数 (近音词与干扰词)
-  # 建议: 正样本数量的 50% ~ 100%
+  # Target count for hard negative samples (near-misses & distractors)
+  # Suggested: 50% to 100% of positive sample count
   target_negative_samples: 1000
 
   # ----------------------------------------------------------------------------
-  # 引擎 A: 本项目内置 Kokoro OpenVINO TTS (极速本地离线合成)
+  # Engine A: Kokoro OpenVINO TTS (Fast local offline neural synthesis)
   # ----------------------------------------------------------------------------
   kokoro:
     enabled: true
-    # 模型路径 (若未指定，脚本将自动在父目录或模型目录中查找 Kokoro-82M-FP16-OpenVINO)
+    # Model directory (auto-searched in parent directories if left empty or relative)
     model_dir: "../Kokoro-82M-FP16-OpenVINO"
-    # 推理设备: CPU (推荐，CPU 推理极快且兼容性最佳) / GPU
+    # Inference device: CPU (recommended for speed and stability) or GPU (Intel GPU)
     device: "CPU"
-    # 语速变化范围 [min, max]，生成时将在此区间均匀随机采样，极大提升语速泛化力
+    # Speed perturbation range [min, max] for acoustic generalization
     speed_range: [0.75, 1.25]
-    # 指定发音人列表。留空 [] 时，脚本会根据 language 自动匹配所有支持的预置发音人
-    # 中文示例: ["zf_xiaobei", "zm_yunjian", "zf_xiaoni", "zm_yunxi"]
-    # 英文示例: ["af_heart", "af_bella", "am_adam", "am_michael"]
-    # 日文示例: ["jf_alpha", "jf_gongitsune", "jm_kumo"]
+    # Voice list. Leave empty [] to auto-select all available voices matching language
+    # English examples: ["af_heart", "af_bella", "am_adam", "am_michael"]
+    # Chinese examples: ["zf_xiaobei", "zm_yunjian", "zf_xiaoni", "zm_yunxi"]
+    # Japanese examples: ["jf_alpha", "jf_gongitsune", "jm_kumo"]
     voices: []
-    # 是否启用音色加权融合 (例如 'zf_xiaobei(0.7)+zm_yunjian(0.3)'，成倍扩充声学多样性)
+    # Weighted voice blending (e.g., 'af_heart(0.7)+am_adam(0.3)') to expand diversity
     enable_voice_blending: true
 
   # ----------------------------------------------------------------------------
-  # 引擎 B: 微软 Edge-TTS (免费高质量云端神经语音)
+  # Engine B: Microsoft Edge-TTS (Free high-quality cloud neural voices)
   # ----------------------------------------------------------------------------
   edge_tts:
     enabled: true
-    # 语速扰动范围 (百分比，例如 "-20%" 到 "+20%")
+    # Perturbation ranges for acoustic variation
     rate_range: ["-20%", "+20%"]
-    # 音调扰动范围 (例如 "-15Hz" 到 "+15Hz")
     pitch_range: ["-15Hz", "+15Hz"]
-    # 音量扰动范围 (例如 "-10%" 到 "+10%")
     volume_range: ["-10%", "+10%"]
-    # 指定 Edge-TTS 发音人列表。留空 [] 时将根据语言自动选择微软精选语音
-    # 中文示例: ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "zh-CN-YunjianNeural", "zh-CN-XiaoyiNeural", "zh-CN-liaoning-XiaobeiNeural"]
-    # 英文示例: ["en-US-JennyNeural", "en-US-GuyNeural", "en-US-AriaNeural", "en-GB-RyanNeural"]
-    # 日文示例: ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"]
+    # Voice list. Leave empty [] to auto-select curated voices matching language
+    # English examples: ["en-US-JennyNeural", "en-US-GuyNeural", "en-US-AriaNeural", "en-GB-RyanNeural"]
+    # Chinese examples: ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "zh-CN-YunjianNeural"]
+    # Japanese examples: ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"]
     voices: []
 
 
 # ------------------------------------------------------------------------------
-# 3. 噪声、混响与声学环境数据 (Noise, RIR & Negatives)
+# 3. Noise, RIR & Negative Feature Datasets
 # ------------------------------------------------------------------------------
 data:
-  # 数据缓存根目录
+  # Root cache directory for datasets
   data_dir: "./data"
 
-  # 数据集下载地址 (支持断点续传与本地缓存检测)
+  # Dataset download URLs (supports resume and local caching)
   downloads:
-    # 1. MIT 房间冲激响应数据集 (MIT Environmental Impulse Responses, ~120MB)
-    # 用于模拟客厅、卧室、办公室等不同房间尺寸与反射条件下的真实混响
+    # 1. MIT Environmental Impulse Responses (~120MB)
+    # Simulates real room acoustics and reverberation for various room sizes
     mit_rirs_url: "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses/resolve/main/mit_rirs.zip"
 
-    # 2. 背景环境噪声数据集 (AudioSet 16kHz 背景音频 / ESC-50 环境音)
-    # 包含风扇、电视、家电、交谈背景音等日常生活背景声
+    # 2. Ambient background noise dataset (ESC-50 / AudioSet)
+    # Includes fans, appliances, speech murmur, household background sounds
     noise_dataset_url: "https://github.com/karolpiczak/ESC-50/archive/master.zip"
 
-    # 3. openWakeWord 官方预计算负样本特征 (ACAV100M 2000 小时语音特征, ~2.5GB)
-    # 深度防止日常对话、看电视播报时的误报
+    # 3. openWakeWord precomputed negative features (ACAV100M 2000 hours, ~2.5GB)
+    # Deeply suppresses false activations during everyday TV playback and conversation
     acav100m_features_url: "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
 
-    # 4. 假阳性基准评估特征集 (~11 小时负样本测试集, ~15MB)
+    # 4. False positive evaluation benchmark features (~11 hours, ~15MB)
     validation_features_url: "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy"
 
   # ----------------------------------------------------------------------------
-  # 音频合成与数据增强参数 (Audio Augmentation)
+  # Audio Augmentation Parameters
   # ----------------------------------------------------------------------------
   augmentation:
-    # 信噪比 (SNR) 混合范围 (单位: dB)。值越小噪声越大，值越大越纯净
+    # Signal-to-noise ratio (SNR) mixing range in dB (smaller = noisier)
     snr_db_range: [5.0, 25.0]
 
-    # 对生成的语音应用 RIR 房间混响的概率 (0.0 ~ 1.0)
+    # Probability of applying RIR room reverberation (0.0 to 1.0)
     rir_probability: 0.75
 
-    # 随机前后静音时间位移最大值 (单位: 秒)，模拟唤醒词在音频流中出现的随机位置
+    # Maximum random silence shift in seconds (simulates wake word position in sliding window)
     time_shift_max_sec: 0.35
 
-    # 统一重采样目标采样率 (openWakeWord 与 Wyoming 标准为 16000 Hz, 单声道)
+    # Uniform target sample rate (standard 16000 Hz, mono)
     sample_rate: 16000
 
 
 # ------------------------------------------------------------------------------
-# 4. 模型训练与 NPU 优化配置 (Training & NPU Optimization)
+# 4. Model Training & Hardware Acceleration
 # ------------------------------------------------------------------------------
 training:
-  # 输出产物目录
+  # Artifacts output directory
   output_dir: "./output"
-  # 输出模型名称 (最终生成 ./output/{model_name}.onnx)
-  model_name: "nihaoxiaozhi_v1"
 
-  # 模型结构超参数 (与 openWakeWord 标准特征流无缝对齐)
+  # Model name (Optional: defaults to wakeword.friend_name if omitted)
+  # model_name: "hey_jarvis_v1"
+
+  # Training hardware device: "auto", "cpu", "cuda", or "xpu" (Intel Arc / Core Ultra GPU via PyTorch XPU)
+  # Note: OpenVINO is an inference runtime; PyTorch trains the neural network.
+  # For Intel GPU, PyTorch 2.4+ native XPU backend or Intel Extension for PyTorch (IPEX) is supported.
+  device: "auto"
+
+  # Feature extraction inference device: "auto", "CPU", or "GPU" (Intel GPU via OpenVINO)
+  feature_device: "auto"
+
+  # Model architecture hyperparameters (fully aligned with openWakeWord specification)
   model_type: "dnn"
-  context_length: 16          # 历史帧窗口数 (16帧 * 80ms = 1.28 秒)
-  embedding_dim: 96           # 特征嵌入维度 (openWakeWord 固定为 96)
-  layer_size: 64              # 全连接层隐藏单元数 (推荐 32, 64 或 128)
+  context_length: 16          # History frame window (16 frames * 80ms = 1.28 seconds)
+  embedding_dim: 96           # Feature embedding dimension (openWakeWord standard 96)
+  layer_size: 64              # Hidden layer size (recommended: 32, 64, or 128)
 
-  # 优化器与训练步数
-  steps: 20000                # 迭代步数 (快速实验建议 5000, 充分训练建议 20000~40000)
-  batch_size: 128             # 批大小
-  learning_rate: 0.001        # 初始学习率
-  weight_decay: 0.00001       # 权重衰减
-  dropout: 0.1                # 训练 Dropout 率 (导出 ONNX 时自动去除，保证推理确定性)
+  # Optimizer & training steps
+  steps: 20000                # Training steps (5000 for quick test, 20000~40000 for production)
+  batch_size: 128             # Batch size
+  learning_rate: 0.001        # Initial learning rate
+  weight_decay: 0.00001       # Weight decay
+  dropout: 0.1                # Dropout rate during training
 
-  # 负样本惩罚权重 (openWakeWord 核心机制: 加大负样本损失权重，强力抑制误触发)
+  # Negative penalty weight (openWakeWord core mechanism to prevent false triggers)
   max_negative_weight: 1500.0
-  # 目标误触发率指标 (小时误报率，越低越好)
+  # Target false positive rate (false alarms per hour, lower is better)
   target_false_positives_per_hour: 0.2
 
   # ----------------------------------------------------------------------------
-  # 针对 Intel NPU / OpenVINO VPUX 引擎的专项优化
+  # Intel NPU / OpenVINO VPUX Dedicated Optimization
   # ----------------------------------------------------------------------------
   npu_optimization:
-    # 强制固定静态形状 [1, 16, 96]
-    # Intel NPU 驱动与 VPUX 编译器对动态 Shape 非常敏感。静态 Shape 能确保:
-    # 1. 100% 成功编译，绝不崩溃
-    # 2. 避免驱动在运行时重新分配内存与 Shape 推导，推理延迟低至微秒级
+    # Force static input shape [1, 16, 96]
+    # Intel NPU requires static shapes for optimal compilation and microsecond-level latency
     force_static_shape: true
     batch_size: 1
 
-    # ONNX Opset 版本 (推荐 17 或 14，NPU 算子支持最稳定)
+    # ONNX Opset version (17 or 14 recommended for NPU operator compatibility)
     onnx_opset: 17
 
-    # 算子图纯净化优化
-    # 使用由 Gemm (Linear) + ReLU + Sigmoid 组成的纯净紧凑计算图
-    # 彻底杜绝 NPU 不友好的动态算子，确保零 CPU 回退 (Zero Fallback)
+    # Operator graph purification
+    # Employs Gemm (Linear) + ReLU + Sigmoid for 100% NPU hardware acceleration with zero CPU fallback
     pure_gemm_graph: true

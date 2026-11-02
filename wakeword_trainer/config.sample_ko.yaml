@@ -1,0 +1,137 @@
+# ==============================================================================
+# Wyoming / openWakeWord 모델 학습 및 데이터 합성 설정 파일 (NPU 최적화 버전)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. 호출어 정의 (Wake Word Definitions)
+# ------------------------------------------------------------------------------
+wakeword:
+  # 대상 호출어 문구 (정례 1.0으로 태깅)
+  # 한국어, 영어 (예: "hey jarvis"), 중국어 등 지원
+  phrase: "hey jarvis"
+
+  # 친화적 모델 식별자 (공백 없음, 출력 파일명 {friend_name}.onnx에 사용)
+  # 주요 사용자가 수정해야 할 설정은 모두 이 'wakeword' 블록에 집중되어 있습니다!
+  friend_name: "hey_jarvis_v1"
+
+  # 후보/변형 호출어 문구 (Positive Variants / Aliases)
+  # 마찬가지로 정례 1.0으로 태깅되어 발음 변형 및 억양에 대한 인식 내구성을 향상시킵니다
+  candidate_phrases:
+    - "jarvis jarvis"
+    - "hi jarvis"
+    - "hello jarvis"
+
+  # NG 부정어 / 유사 발음 / 방해 단어 (Hard Negatives / Near Misses)
+  # 엄격하게 부정어 0.0으로 태깅됩니다. 오발화(False Accept) 억제의 가장 핵심적인 수단입니다!
+  hard_negatives:
+    - "hey harvest"
+    - "hey service"
+    - "jarvis"
+    - "harvest"
+    - "service"
+    - "불 켜줘"
+    - "불 꺼줘"
+    - "오늘 날씨"
+
+  # 언어 코드 (TTS 화자 자동 매칭 및 텍스트 프론트엔드용)
+  language: "en"
+
+
+# ------------------------------------------------------------------------------
+# 2. 듀얼 엔진 TTS 합성 음성 생성 설정 (Dual-Engine TTS Generation)
+# ------------------------------------------------------------------------------
+tts:
+  output_dir: "./data/synthetic_speech"
+
+  # 정례 음성 생성 목표 수량 (Kokoro 및 Edge-TTS 분담)
+  # 권장: 테스트 검증 200~500개, 정식 학습 2000~5000개
+  target_positive_samples: 2000
+
+  # 부정어 음성 생성 목표 수량
+  # 권장: 정례 수량의 50% ~ 100%
+  target_negative_samples: 1000
+
+  # ----------------------------------------------------------------------------
+  # 엔진 A: Kokoro OpenVINO TTS (초고속 로컬 오프라인 신경망 합성)
+  # ----------------------------------------------------------------------------
+  kokoro:
+    enabled: true
+    model_dir: "../Kokoro-82M-FP16-OpenVINO"
+    device: "CPU"
+    speed_range: [0.75, 1.25]
+    voices: []
+    enable_voice_blending: true
+
+  # ----------------------------------------------------------------------------
+  # 엔진 B: Microsoft Edge-TTS (무료 고품질 클라우드 신경망 음성)
+  # ----------------------------------------------------------------------------
+  edge_tts:
+    enabled: true
+    rate_range: ["-20%", "+20%"]
+    pitch_range: ["-15Hz", "+15Hz"]
+    volume_range: ["-10%", "+10%"]
+    voices: []
+
+
+# ------------------------------------------------------------------------------
+# 3. 소음, RIR 및 부정어 특징 데이터셋
+# ------------------------------------------------------------------------------
+data:
+  data_dir: "./data"
+
+  downloads:
+    # 1. MIT 실내 충격 응답 데이터셋 (MIT RIR, ~120MB)
+    mit_rirs_url: "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses/resolve/main/mit_rirs.zip"
+
+    # 2. 배경 환경 소음 데이터셋 (ESC-50 / AudioSet)
+    noise_dataset_url: "https://github.com/karolpiczak/ESC-50/archive/master.zip"
+
+    # 3. openWakeWord 공식 사전 계산 부정어 특징 (ACAV100M 2000시간, ~2.5GB)
+    acav100m_features_url: "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+    # 4. 오발화 평가 벤치마크 특징 (~11시간, ~15MB)
+    validation_features_url: "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy"
+
+  augmentation:
+    snr_db_range: [5.0, 25.0]
+    rir_probability: 0.75
+    time_shift_max_sec: 0.35
+    sample_rate: 16000
+
+
+# ------------------------------------------------------------------------------
+# 4. 모델 학습 및 하드웨어 가속 설정
+# ------------------------------------------------------------------------------
+training:
+  output_dir: "./output"
+
+  # 모델명 (생략 시 wakeword.friend_name이 자동으로 사용됩니다)
+  # model_name: "hey_jarvis_v1"
+
+  # 학습 장치: "auto", "cpu", "cuda", 또는 "xpu" (Intel Arc / Core Ultra GPU, PyTorch 2.4+ XPU / IPEX)
+  # 참고: OpenVINO는 추론 런타임이며 PyTorch의 역전파 학습을 수행하지 않습니다.
+  # Intel GPU 학습은 PyTorch의 "xpu" 백엔드를 통해 실행됩니다.
+  device: "auto"
+
+  # 특징 추출 추론 장치: "auto", "CPU", 또는 "GPU" (OpenVINO Intel GPU)
+  feature_device: "auto"
+
+  model_type: "dnn"
+  context_length: 16
+  embedding_dim: 96
+  layer_size: 64
+
+  steps: 20000
+  batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  dropout: 0.1
+
+  max_negative_weight: 1500.0
+  target_false_positives_per_hour: 0.2
+
+  npu_optimization:
+    force_static_shape: true
+    batch_size: 1
+    onnx_opset: 17
+    pure_gemm_graph: true

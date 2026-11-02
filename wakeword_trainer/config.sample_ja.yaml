@@ -1,0 +1,143 @@
+# ==============================================================================
+# Wyoming / openWakeWord モデル学習＆合成設定ファイル (NPU 最適化版)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. ウェイクワード定義 (Wake Word Definitions)
+# ------------------------------------------------------------------------------
+wakeword:
+  # ターゲットウェイクワード (正例 1.0 としてマーク)
+  # 日本語 (例: "こんにちはアシスタント")、英語 (例: "hey jarvis")、中国語などに対応
+  phrase: "hey jarvis"
+
+  # フレンドリーモデル識別名 (スペースなし、出力ファイル名 {friend_name}.onnx に使用)
+  # 主に変更が必要な設定はこの 'wakeword' ブロックに集約されています！
+  friend_name: "hey_jarvis_v1"
+
+  # 候補・異表記フレーズ (Positive Variants / Aliases)
+  # 同様に正例 1.0 としてマークされ、発音のゆらぎやアクセントへの耐性を強化します
+  candidate_phrases:
+    - "jarvis jarvis"
+    - "hi jarvis"
+    - "hello jarvis"
+
+  # NG 負例フレーズ / 類似音 / 妨害語 (Hard Negatives / Near Misses)
+  # 厳密に負例 0.0 としてマークされます。誤検出（False Accept）を防ぐ最も重要な要素です！
+  hard_negatives:
+    - "hey harvest"
+    - "hey service"
+    - "jarvis"
+    - "harvest"
+    - "service"
+    - "電気をつけて"
+    - "電気を消して"
+    - "今日の天気"
+
+  # 言語コード (TTS 発音話者選択およびテキスト前処理用)
+  language: "en"
+
+
+# ------------------------------------------------------------------------------
+# 2. デュアルエンジン TTS 音声データ合成設定 (Dual-Engine TTS Generation)
+# ------------------------------------------------------------------------------
+tts:
+  # 合成音声の出力ディレクトリ
+  output_dir: "./data/synthetic_speech"
+
+  # 正例音声の生成目標数 (Kokoro と Edge-TTS で分担生成)
+  # 推奨: 検証用 200~500 件、本番学習用 2000~5000 件
+  target_positive_samples: 2000
+
+  # ハード負例音声の生成目標数
+  # 推奨: 正例数の 50% ~ 100%
+  target_negative_samples: 1000
+
+  # ----------------------------------------------------------------------------
+  # エンジン A: Kokoro OpenVINO TTS (高速ローカルオフライン合成)
+  # ----------------------------------------------------------------------------
+  kokoro:
+    enabled: true
+    # モデルディレクトリ (親ディレクトリから自動探索)
+    model_dir: "../Kokoro-82M-FP16-OpenVINO"
+    # 推論デバイス: CPU (推奨、高速かつ安定) または GPU (Intel GPU)
+    device: "CPU"
+    # 話速の摂動範囲 [min, max]
+    speed_range: [0.75, 1.25]
+    # 話者リスト。空 [] の場合、言語に合わせて利用可能な話者を自動選択
+    voices: []
+    # 音声ブレンド合成 (例: 'af_heart(0.7)+am_adam(0.3)')
+    enable_voice_blending: true
+
+  # ----------------------------------------------------------------------------
+  # エンジン B: Microsoft Edge-TTS (高品質クラウドレスポンス音声)
+  # ----------------------------------------------------------------------------
+  edge_tts:
+    enabled: true
+    rate_range: ["-20%", "+20%"]
+    pitch_range: ["-15Hz", "+15Hz"]
+    volume_range: ["-10%", "+10%"]
+    voices: []
+
+
+# ------------------------------------------------------------------------------
+# 3. ノイズ、RIR & 負例特徴データセット
+# ------------------------------------------------------------------------------
+data:
+  data_dir: "./data"
+
+  downloads:
+    # 1. MIT 室内インパルス応答データセット (MIT RIR, ~120MB)
+    mit_rirs_url: "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses/resolve/main/mit_rirs.zip"
+
+    # 2. 環境背景ノイズデータセット (ESC-50 / AudioSet)
+    noise_dataset_url: "https://github.com/karolpiczak/ESC-50/archive/master.zip"
+
+    # 3. openWakeWord 公式事前計算負例特徴量 (ACAV100M 2000時間, ~2.5GB)
+    acav100m_features_url: "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+    # 4. 誤検出評価ベンチマーク特徴量 (~11時間, ~15MB)
+    validation_features_url: "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy"
+
+  augmentation:
+    snr_db_range: [5.0, 25.0]
+    rir_probability: 0.75
+    time_shift_max_sec: 0.35
+    sample_rate: 16000
+
+
+# ------------------------------------------------------------------------------
+# 4. モデル学習とハードウェアアクセラレーション設定
+# ------------------------------------------------------------------------------
+training:
+  output_dir: "./output"
+
+  # モデル名 (省略時は wakeword.friend_name が自動使用されます)
+  # model_name: "hey_jarvis_v1"
+
+  # 学習デバイス: "auto", "cpu", "cuda", または "xpu" (Intel Arc / Core Ultra GPU, PyTorch 2.4+ XPU / IPEX)
+  # 注意: OpenVINO は推論ランタイムであり PyTorch の勾配逆伝播学習は行えません。
+  # Intel GPU での学習は PyTorch の "xpu" バックエンドを介して行われます。
+  device: "auto"
+
+  # 特徴抽出推論デバイス: "auto", "CPU", または "GPU" (OpenVINO Intel GPU)
+  feature_device: "auto"
+
+  model_type: "dnn"
+  context_length: 16
+  embedding_dim: 96
+  layer_size: 64
+
+  steps: 20000
+  batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  dropout: 0.1
+
+  max_negative_weight: 1500.0
+  target_false_positives_per_hour: 0.2
+
+  npu_optimization:
+    force_static_shape: true
+    batch_size: 1
+    onnx_opset: 17
+    pure_gemm_graph: true
