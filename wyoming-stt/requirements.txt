@@ -1,0 +1,21 @@
+# ===========================================================================
+# Wyoming STT (Speech Recognition - Whisper OpenVINO) Dependencies
+# ===========================================================================
+
+# Wyoming protocol core library
+wyoming>=1.5.0
+
+# Intel OpenVINO GenAI pipeline (Whisper inference)
+openvino-genai>=2024.0
+
+# Numerical computing
+numpy>=1.24.0
+
+# CLI argument parsing
+typer>=0.9.0
+
+# Chinese simplified/traditional character conversion
+opencc-python-reimplemented>=0.1.7
+
+# YAML configuration and i18n support
+pyyaml>=6.0

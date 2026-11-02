@@ -1,0 +1,61 @@
+# ===========================================================================
+# Wyoming Wake Word Service Configuration File
+# ===========================================================================
+# This file configures OpenVINO hardware acceleration and concurrent detection
+# parameters for multiple wake word models.
+#
+# Usage:
+#   python wyoming-wakeword.py --config wakeword_config.yaml
+# ===========================================================================
+
+# --- Server Network Configuration ---
+server:
+  host: "0.0.0.0"       # Listen address (0.0.0.0 permits LAN connections such as Home Assistant)
+  port: 10400           # Listen port (Wyoming openWakeWord default port is 10400)
+  log_level: "INFO"     # Log level: DEBUG / INFO / WARNING / ERROR
+
+# --- Global Default Inference & Detection Settings ---
+default_device: "NPU"   # Default inference device: NPU (Intel Core Ultra NPU) / GPU / CPU / AUTO
+                        # Features smart hardware fallback: NPU -> GPU -> CPU
+default_cutoff: 0.5     # Default confidence cutoff threshold (0.0 - 1.0), 0.5 - 0.7 recommended
+default_refractory: 2.0 # Default refractory period after trigger (seconds) to prevent duplicate triggers
+
+# --- openWakeWord Base Feature Extraction Models (Optional) ---
+# If omitted or left empty, the service locates or downloads from local models/, openwakeword pkg, or GitHub
+feature_models:
+  melspec_model: "models/melspectrogram.onnx"
+  # melspec_device: "NPU" # Optional: defaults to default_device with NPU -> GPU -> CPU fallback
+  embedding_model: "models/embedding_model.onnx"
+
+# --- Wake Word Multi-Model List (Concurrent detection of multiple wake words) ---
+# Each model can independently override cutoff, refractory, and device
+models:
+  # Example 1: Hey Jarvis
+  - name: "hey_jarvis"
+    phrase: "Hey Jarvis"
+    model_path: "models/hey_jarvis_v0.1.onnx"
+    cutoff: 0.6            # Specific threshold to reduce false activations
+    refractory: 3.0        # 3 seconds refractory period
+    device: "NPU"          # Run on NPU
+    languages:
+      - "en"
+
+  # Example 2: Alexa
+  - name: "alexa"
+    phrase: "Alexa"
+    model_path: "models/alexa_v0.1.onnx"
+    cutoff: 0.5
+    refractory: 2.0
+    device: "NPU"
+    languages:
+      - "en"
+
+  # Example 3: Custom wake word (e.g., custom trained model)
+  # - name: "custom_wakeword"
+  #   phrase: "Custom Wake Word"
+  #   model_path: "models/custom_wakeword.onnx"
+  #   cutoff: 0.55
+  #   refractory: 2.5
+  #   device: "NPU"
+  #   languages:
+  #     - "en"

@@ -1,0 +1,33 @@
+cli:
+  help: "Wyoming STT サービス - OpenVINO Whisper 多言語音声認識"
+  options:
+    model_dir: "OpenVINO Whisper モデルディレクトリのパス (.xml/.bin および tokenizer ファイルを含む)"
+    host: "サーバーのリッスンアドレス"
+    port: "サーバーのリッスンポート"
+    device: "OpenVINO 推論デバイス (CPU / GPU / AUTO / MULTI:CPU,GPU)"
+    language: "デフォルトの認識言語コード (デフォルト 'auto'、Wyoming プロトコルのリクエストを優先)"
+    to_simplified: "中国語認識モードで簡体字出力を強制 (未指定時は繁体字)"
+    model_name: "Wyoming サービス検出および Home Assistant 表示用モデル名"
+    log_level: "ログレベル (DEBUG / INFO / WARNING / ERROR)"
+
+log:
+  opencc_python_loaded: "Python opencc 変換ライブラリを読み込みました"
+  opencc_system_loaded: "ctypes 経由でシステム libopencc を読み込みました ({lib_name})"
+  opencc_failed: "OpenCC 変換エラー: {error}"
+  opencc_not_found: "opencc ライブラリが見つかりません。簡体字/繁体字変換は無効です。推奨: pip install opencc-python-reimplemented"
+  protocol_lang_specified: "Wyoming プロトコル指定言語: {lang}"
+  protocol_lang_default: "Wyoming プロトコルで言語未指定。デフォルト/自動検出を使用: {lang}"
+  empty_audio: "空の音声データを受信したため、認識をスキップします"
+  transcription_result: "音声認識結果 (言語={lang}): {text}"
+  loading_model: "Whisper モデルを読み込んでいます: {path}"
+  inference_device: "推論デバイス: {device}"
+  default_lang_strategy: "デフォルト言語設定: {lang} (Wyoming プロトコルリクエストを優先)"
+  chinese_strategy: "中国語簡繁方針: {strategy}"
+  forced_simplified: "簡体字を強制 (--to-simplified)"
+  default_traditional: "デフォルト繁体字"
+  model_loaded: "モデルの読み込みが完了しました"
+  service_started: "STT サービスが開始されました: {host}:{port} (デフォルト: {lang}、プロトコル指定および自動検出対応)"
+
+wyoming:
+  program_description: "OpenVINOベースの {model_name} 多言語音声認識サービス (自動検出および日/英/中/韓等対応)"
+  model_description: "OpenVINO {model_name} (自動/多言語)"

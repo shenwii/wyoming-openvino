@@ -1,0 +1,33 @@
+cli:
+  help: "Wyoming STT 服务 - 基于 OpenVINO 的多语言 Whisper 语音识别"
+  options:
+    model_dir: "OpenVINO Whisper 模型目录路径（需包含导出的 .xml/.bin 及 tokenizer 文件）"
+    host: "服务监听地址"
+    port: "服务监听端口"
+    device: "OpenVINO 推理设备（CPU / GPU / AUTO / MULTI:CPU,GPU）"
+    language: "默认识别语言代码（默认为 auto 自动检测；若 Wyoming 协议传入了语言则优先遵循协议）"
+    to_simplified: "中文识别模式下强制输出简体中文（未指定时默认为繁体中文）"
+    model_name: "模型名称，用于 Wyoming 服务发现和 Home Assistant 显示"
+    log_level: "日志级别（DEBUG / INFO / WARNING / ERROR）"
+
+log:
+  opencc_python_loaded: "成功加载 Python opencc 繁简转换库"
+  opencc_system_loaded: "成功通过 ctypes 加载系统 libopencc 动态库 ({lib_name})"
+  opencc_failed: "繁简转换执行异常: {error}"
+  opencc_not_found: "未检测到可用 opencc 库，繁简转换未生效。建议安装: pip install opencc-python-reimplemented"
+  protocol_lang_specified: "Wyoming 协议指定识别语言: {lang}"
+  protocol_lang_default: "Wyoming 协议未指定语言，使用默认/自动检测: {lang}"
+  empty_audio: "收到空的音频数据，跳过识别"
+  transcription_result: "识别结果 (语言={lang}): {text}"
+  loading_model: "正在加载 Whisper 模型: {path}"
+  inference_device: "推理设备: {device}"
+  default_lang_strategy: "默认语言策略: {lang} (优先遵循 Wyoming 协议请求)"
+  chinese_strategy: "中文简繁策略: {strategy}"
+  forced_simplified: "强制简体 (--to-simplified)"
+  default_traditional: "默认繁体"
+  model_loaded: "模型加载完毕"
+  service_started: "STT 服务启动: {host}:{port} (默认: {lang}，支持协议指定与自动识别)"
+
+wyoming:
+  program_description: "基于 OpenVINO 的 {model_name} 多语言语音识别服务 (支持自动检测及中/英/日/韩等)"
+  model_description: "OpenVINO {model_name} (自动/多语言)"

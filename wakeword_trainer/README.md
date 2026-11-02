@@ -193,19 +193,20 @@ python wyoming-wakeword.py \
 ```
 
 ### YAML 配置文件方式启动:
-在主项目的 `wakeword_config.yaml` 的 `models` 列表中添加：
+在 `wyoming-wakeword/wakeword_config.yaml` 的 `models` 列表中添加：
 ```yaml
 models:
   - name: "nihaoxiaozhi"
-    model_path: "wakeword_trainer/output/nihaoxiaozhi_v1.onnx"
+    model_path: "../wakeword_trainer/output/nihaoxiaozhi_v1.onnx"
     phrase: "你好小智"
     cutoff: 0.55
     refractory: 2.0
     device: "NPU"
     languages: ["zh"]
 ```
-然后启动服务：
+然后进入 `wyoming-wakeword` 目录启动服务：
 ```bash
+cd wyoming-wakeword
 python wyoming-wakeword.py --config wakeword_config.yaml
 ```
 

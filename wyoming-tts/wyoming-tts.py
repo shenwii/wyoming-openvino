@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Wyoming TTS 服务 (Kokoro OpenVINO 极速多语言版)
-==============================================
-基于 Intel OpenVINO 加速的 Kokoro-82M 语音合成服务，通过 Wyoming 协议无缝对接 Home Assistant。
+Wyoming TTS Service (Kokoro OpenVINO High-Speed Multilingual)
+============================================================
+Kokoro-82M text-to-speech service accelerated by Intel OpenVINO, seamlessly
+integrated with Home Assistant via the standard Wyoming protocol.
 
-重构亮点与设计参考:
-    - 参考 remsky/Kokoro-FastAPI (Apache 2.0) 与 hexgrad/kokoro (Apache 2.0) 前端设计。
-    - 采用全新流式分句与延迟音素转换机制（Streaming Chunking & Lazy Phonemization），
-      首句秒级出声（TTFA < 0.3s），彻底消除整篇等待一分钟的卡顿问题。
-    - 原生全面支持多语言：
-        * 中文 (zh / z): 原生 misaki.zh G2P，支持汉字与中英混排（en_callable 自动处理英文单词）
-        * 日语 (ja / j): 原生 misaki.ja G2P，准确解析汉字假名与日式读音，彻底修复假名与汉字识别冲突
-        * 英语 (en / a, b): 美音 (a) 与英音 (b)
-        * 西班牙语 (es / e)、法语 (fr / f)、印地语 (hi / h)、意大利语 (it / i)、葡萄牙语 (pt / p)
-    - 支持 Kokoro-FastAPI 风格的多音色加权融合 (Voice Blending): 如 'zf_xiaobei(0.7)+af_heart(0.3)'。
-    - 针对 Intel OpenVINO 硬件推理进行极致优化 (LATENCY 模式、线程调优、服务启动自动预热)。
+Features & Design:
+    - Designed with inspiration from remsky/Kokoro-FastAPI and hexgrad/kokoro frontends.
+    - Streaming chunking and lazy phonemization for sub-second first-chunk audio (TTFA < 0.3s).
+    - Native multilingual support:
+        * Mandarin Chinese (zh / z): Native misaki.zh G2P with Chinese/English mixed text handling
+        * Japanese (ja / j): Native misaki.ja G2P with accurate kanji & kana pronunciation
+        * English (en / a, b): American English (a) and British English (b)
+        * Spanish (es / e), French (fr / f), Hindi (hi / h), Italian (it / i), Portuguese (pt / p)
+    - Weighted voice blending: e.g. 'zf_xiaobei(0.7)+af_heart(0.3)'.
+    - Intel OpenVINO optimization (LATENCY mode, thread configuration, cold-start warm-up).
 
-使用示例:
+Usage Example:
     python wyoming-tts.py --model-dir ./Kokoro-82M-FP16-OpenVINO --device CPU --speed 0.85 --port 10021
 """
 
@@ -42,8 +42,10 @@ from wyoming.info import Attribution, Describe, Info, TtsProgram, TtsVoice
 from wyoming.server import AsyncEventHandler, AsyncServer
 from wyoming.tts import Synthesize
 
+from i18n import t
+
 # ---------------------------------------------------------------------------
-# 日志配置
+# Logging configuration
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -52,13 +54,13 @@ logging.basicConfig(
 logger = logging.getLogger("wyoming-tts")
 
 # ---------------------------------------------------------------------------
-# Typer CLI 应用
+# Typer CLI application
 # ---------------------------------------------------------------------------
-app = typer.Typer(help="Wyoming TTS 服务 - 基于 OpenVINO 的多语言 Kokoro 语音合成")
+app = typer.Typer(help=t("cli.help"))
 
 
 # ===========================================================================
-# Kokoro 默认标准词汇表与语言映射定义 (178 Tokens 官方完全对齐)
+# Kokoro Default Vocabulary & Language Mappings (178 Tokens)
 # ===========================================================================
 _DEFAULT_VOCAB_SYMBOLS = [
     "$", ";", ":", ",", ".", "!", "?", "—", "…", "“", "”", "«", "»", "   ", "  ", " ",
@@ -76,7 +78,7 @@ _DEFAULT_VOCAB_SYMBOLS = [
 ]
 DEFAULT_VOCAB: Dict[str, int] = {s: i for i, s in enumerate(_DEFAULT_VOCAB_SYMBOLS)}
 
-# 发音人前缀对应语言代码（与 Kokoro-FastAPI 严格一致）
+# Voice prefix to primary language code mapping
 VOICE_PREFIX_TO_LANG: Dict[str, str] = {
     "a": "en",  # American English (af_*, am_*)
     "b": "en",  # British English (bf_*, bm_*)
@@ -89,7 +91,7 @@ VOICE_PREFIX_TO_LANG: Dict[str, str] = {
     "p": "pt",  # Portuguese (pf_*, pm_*)
 }
 
-# 单字母代码与 ISO 语言代码互通表
+# Single-letter and ISO language code bidirectional mapping
 LANG_CODE_MAP: Dict[str, str] = {
     "zh": "z", "zh-cn": "z", "chinese": "z", "z": "z",
     "ja": "j", "japanese": "j", "j": "j",
@@ -102,19 +104,14 @@ LANG_CODE_MAP: Dict[str, str] = {
     "pt": "p", "portuguese": "p", "p": "p",
 }
 
-# 语言可读名称映射
-LANG_NAMES: Dict[str, str] = {
-    "zh": "中文 (Mandarin)",
-    "en": "English",
-    "ja": "日本語 (Japanese)",
-    "es": "Español (Spanish)",
-    "fr": "Français (French)",
-    "hi": "हिन्दी (Hindi)",
-    "it": "Italiano (Italian)",
-    "pt": "Português (Portuguese)",
-}
 
-# 常见缩写保护列表（防止因点号截断断句）
+def get_lang_display_name(code: str) -> str:
+    """Return localized display name for a language code from YAML."""
+    translated = t(f"languages.{code}")
+    return translated if translated != f"languages.{code}" else code
+
+
+# Common abbreviation protection list (avoids splitting sentences on dots)
 ABBREVIATIONS = (
     r"Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e|approx|dept|min|max|fig|no|vol|"
     r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec|St|Ave|Rd|Corp|Inc|Ltd|Co"
@@ -122,55 +119,49 @@ ABBREVIATIONS = (
 
 
 # ===========================================================================
-# 文本清洗、智能分句与流式分块 (Streaming Text Processor)
+# Streaming Text Processor
 # ===========================================================================
 def normalize_text_spacing(text: str) -> str:
     """
-    规范化文本空格与特殊字符，处理中西文混排边界：
-    1. 全角空格转半角；
-    2. 中文字符与英文字母/数字边界补必要间隙，避免分词发音黏连；
-    3. 保护常见英文缩写全大写词汇（如 AI, CPU, GPU, TTS, OpenVINO）。
+    Normalize text whitespace and boundaries between CJK and Latin characters:
+    1. Converts full-width spaces to half-width.
+    2. Inserts space between Chinese characters and alphanumeric words.
+    3. Preserves acronyms (AI, CPU, GPU, OpenVINO).
     """
     if not text:
         return ""
     text = text.replace("\u3000", " ").strip()
-    # 中文字符与英文字母边界微调（不破坏连续英文）
     text = re.sub(r"([\u4e00-\u9fff])([a-zA-Z0-9])", r"\1 \2", text)
     text = re.sub(r"([a-zA-Z0-9])([\u4e00-\u9fff])", r"\1 \2", text)
-    # 多空格压缩
     text = re.sub(r"[ \t]+", " ", text)
     return text
 
 
 def split_text_into_streaming_chunks(text: str, max_chunk_chars: int = 35) -> List[str]:
     """
-    将待合成长文本智能切分为自然的语音分句流。
-    核心思想参考 Kokoro-FastAPI 的断句哲学:
-      1. 保护缩写与浮点数（如 Dr., 3.14），严防生硬断裂；
-      2. 严格保留句尾语气标点（。！？!?），保证声学生成具备自然的语调抑扬顿挫；
-      3. 超长句子按从句停顿标点（，、；;:—）智能二次分块；
-      4. 严格将分句颗粒度控制在约 15~35 字，使首句能够极速出声，边播边算，消除等待。
+    Intelligently split long text into natural sentence streaming clauses.
+    Principles:
+      1. Protect abbreviations and decimals (e.g. Dr., 3.14).
+      2. Preserve terminal punctuation (。！？!?) for expressive acoustic intonation.
+      3. Sub-split long clauses along intermediate punctuation (，、；;:—).
+      4. Maintain clause size around 15-35 characters for sub-second first-chunk audio.
     """
     text = normalize_text_spacing(text)
     if not text:
         return []
 
     ZWS = "\u200b"
-    # 1. 占位符保护浮点数与英文缩写中的句点 (注意: 严禁在原始正则字符串中使用 \\u，防止 Python 3.12+ 报 bad escape \\u 异常)
     protected = re.sub(r"(\d)\.(\d)", rf"\g<1>{ZWS}\g<2>", text)
     protected = re.sub(rf"\b({ABBREVIATIONS})\.", rf"\g<1>{ZWS}", protected, flags=re.IGNORECASE)
     protected = re.sub(r"\b([A-Z])\.", rf"\g<1>{ZWS}", protected)
 
-    # 2. 匹配主句结束符：中日句号问叹标点 [。！？!?] 或 英文句号后接空白/换行
     sentence_pattern = r"([^。！？!?\r\n]+(?:[。！？!?]+|\.(?=\s|$))?)"
     raw_sentences = [s.strip() for s in re.findall(sentence_pattern, protected) if s.strip()]
 
-    # 3. 恢复占位符
     sentences = [s.replace(ZWS, ".") for s in raw_sentences]
     if not sentences:
         sentences = [text]
 
-    # 4. 二次平滑从句分块
     chunks: List[str] = []
     for sentence in sentences:
         if len(sentence) <= max_chunk_chars:
@@ -183,7 +174,6 @@ def split_text_into_streaming_chunks(text: str, max_chunk_chars: int = 35) -> Li
             chunks.append(sentence)
             continue
 
-        # 防止长无标点句子过长导致超显存/超时，对单子句进行词/字符级安全截断
         safe_clauses: List[str] = []
         for c in raw_clauses:
             if len(c) > max_chunk_chars:
@@ -224,21 +214,19 @@ def split_text_into_streaming_chunks(text: str, max_chunk_chars: int = 35) -> Li
     return chunks if chunks else [text]
 
 
-# 保持向后兼容的别名函数
 split_text_into_chunks = split_text_into_streaming_chunks
 
 
 # ===========================================================================
-# 多语言 G2P 前端引擎管理器 (Kokoro Multi-Language G2P Frontend)
+# Kokoro Multi-Language G2P Frontend
 # ===========================================================================
 def detect_language(text: str, default_lang: str = "zh") -> str:
     """
-    根据文本字符特征智能判定语言：
-    - 包含日文平假名/片假名 ([\u3040-\u309F\u30A0-\u30FF]) -> 绝对属于日语 (ja)！
-      (注：日文句子常夹杂汉字，但只要存在假名，必须判定为 ja，彻底解决旧脚本将日文误判为中文的严重缺陷)
-    - 包含汉字且无假名 -> 中文 (zh)
-    - 纯拉丁字母或西文字符 -> 英语 (en)
-    - 其他无法判定的字符 -> 回退到默认语言
+    Detect language from character features:
+    - Contains Hiragana or Katakana -> Japanese (ja)
+    - Contains Hanzi without kana -> Chinese (zh)
+    - Pure Latin characters -> English (en)
+    - Otherwise fallback to default language
     """
     if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text):
         return "ja"
@@ -251,8 +239,8 @@ def detect_language(text: str, default_lang: str = "zh") -> str:
 
 class MultiLangG2P:
     """
-    Kokoro 多语言 G2P（字素到音素）转换引擎管理器。
-    参考 Kokoro-FastAPI，支持中、英、日、法、西、意、印、葡等全语言按需懒加载与高速缓存。
+    Kokoro Multilingual G2P (Grapheme-to-Phoneme) Frontend Manager.
+    Supports on-demand lazy loading and caching for all Kokoro language families.
     """
 
     def __init__(
@@ -265,11 +253,11 @@ class MultiLangG2P:
         self._g2p_cache: Dict[str, object] = {}
 
     def detect_language_from_text(self, text: str) -> str:
-        """根据文本内容智能检测语言（兼容方法）。"""
+        """Detect language from text content."""
         return detect_language(text, default_lang=self.fallback_language)
 
     def get_g2p(self, lang_key: Optional[Union[str, object]] = None):
-        """按需获取指定语言的 G2P 引擎实例。"""
+        """Get or initialize G2P engine for the requested language."""
         if callable(lang_key):
             return lang_key, "custom"
 
@@ -279,7 +267,6 @@ class MultiLangG2P:
         if str(lang_key) in self._g2p_cache:
             return self._g2p_cache[str(lang_key)], str(lang_key)
 
-        # 归一化为单字母代码 (z, j, a, b, e, f, h, i, p)
         lang_str = str(lang_key).lower().split("-")[0]
         lang_code = LANG_CODE_MAP.get(lang_str, lang_str)
 
@@ -291,20 +278,18 @@ class MultiLangG2P:
         return engine, lang_code
 
     def _create_g2p(self, lang_code: str):
-        """按语言代码初始化 G2P 实例，优先原生 KPipeline，回退 misaki。"""
-        # 1. 尝试使用 Kokoro 原生 KPipeline (若用户环境已安装 kokoro 库)
+        """Initialize G2P engine by language code: prefers KPipeline, falls back to misaki."""
         try:
             from kokoro import KPipeline
-            logger.info("使用 Kokoro 原生 KPipeline 前端 (lang_code=%s, model=False)", lang_code)
+            logger.info(t("log.pipeline_frontend", lang_code=lang_code))
             return KPipeline(lang_code=lang_code, model=False)
         except Exception:
             pass
 
-        # 2. 回退到 misaki 多语言 G2P 前端
         try:
             if lang_code in ("a", "b"):
                 from misaki import en
-                logger.info("初始化英文 G2P (dialect=%s)", "British" if lang_code == "b" else "American")
+                logger.info(t("log.init_en_g2p", dialect="British" if lang_code == "b" else "American"))
                 fallback = None
                 try:
                     from misaki import espeak
@@ -318,14 +303,13 @@ class MultiLangG2P:
 
             elif lang_code == "j":
                 from misaki import ja
-                logger.info("初始化日文 G2P (misaki.ja.JAG2P)")
+                logger.info(t("log.init_ja_g2p"))
                 return ja.JAG2P()
 
             elif lang_code == "z":
                 from misaki import zh
-                logger.info("初始化中文 G2P (misaki.zh.ZHG2P)")
+                logger.info(t("log.init_zh_g2p"))
 
-                # 中文遇到英文单词时的回调转换函数（带高速 LRU 缓存）
                 @lru_cache(maxsize=2048)
                 def en_word_callable(word: str) -> str:
                     word = word.strip()
@@ -344,10 +328,9 @@ class MultiLangG2P:
                     except Exception:
                         return word
 
-                # 检查当前模型词汇表是否支持 v1.1 注音（ㄓ, ㄅ 等），若基础模型则使用 version=None 输出标准 IPA
                 has_zhuyin = bool(self.vocab and any(sym in self.vocab for sym in ("ㄓ", "ㄅ", "中", "阳")))
                 zh_version = "1.1" if has_zhuyin else None
-                logger.info("中文 G2P 配置: version=%s (词表原生注音: %s)", zh_version, has_zhuyin)
+                logger.info(t("log.zh_config", version=zh_version, zhuyin=has_zhuyin))
 
                 try:
                     return zh.ZHG2P(version=zh_version, en_callable=en_word_callable)
@@ -358,8 +341,7 @@ class MultiLangG2P:
                         return zh.ZHG2P()
 
             else:
-                # 其它语言（西班牙、法国、意大利、印地、葡萄牙等）
-                logger.info("初始化语言 '%s' 的 G2P 引擎", lang_code)
+                logger.info(t("log.init_other_g2p", lang_code=lang_code))
                 try:
                     from misaki import espeak
                     espeak_lang_map = {
@@ -368,7 +350,7 @@ class MultiLangG2P:
                     lang_name = espeak_lang_map.get(lang_code, "en-us")
                     return espeak.EspeakG2P(language=lang_name)
                 except Exception as e:
-                    logger.warning("未配置 espeak-ng，回退到英文 G2P: %s", e)
+                    logger.warning(t("log.espeak_fallback", error=str(e)))
                     from misaki import en
                     return en.G2P(trf=False)
 
@@ -379,14 +361,12 @@ class MultiLangG2P:
                 "a": "pip install 'misaki[en]'",
                 "b": "pip install 'misaki[en]'",
             }.get(lang_code, "pip install misaki")
-            msg = f"加载语言 '{lang_code}' 的 G2P 引擎失败，请执行安装命令: {install_cmd} ({exc})"
+            msg = f"Failed to load G2P engine for '{lang_code}', please install: {install_cmd} ({exc})"
             logger.error(msg)
             raise RuntimeError(msg) from exc
 
     def text_to_tokens(self, text: str, language: Optional[Union[str, object]] = None) -> np.ndarray:
-        """
-        将单句文本通过 G2P 快速转换为 Kokoro 模型所需的 Token ID 序列。
-        """
+        """Convert single sentence text to Kokoro token ID sequence."""
         if callable(language):
             g2p_engine = language
         else:
@@ -395,10 +375,9 @@ class MultiLangG2P:
         try:
             res = g2p_engine(text)
         except Exception as e:
-            logger.warning("G2P 转换异常 ('%s'): %s，尝试降级纯文本映射", text, e)
+            logger.warning(t("log.g2p_error", text=text, error=str(e)))
             res = text
 
-        # 从 G2P / KPipeline 结果中解析出音素字符串
         from inspect import isgenerator
         if isgenerator(res) or hasattr(res, "__next__"):
             phoneme_parts = []
@@ -429,24 +408,20 @@ class MultiLangG2P:
         else:
             ps = str(res)
 
-        # 查表匹配 Token IDs
         active_vocab = self.vocab or DEFAULT_VOCAB
         matched_ids = [active_vocab[c] for c in ps if c in active_vocab]
 
         if not matched_ids:
-            logger.warning("音素 '%s' (原文: '%s') 未命中词汇表字符", ps, text)
+            logger.warning(t("log.phoneme_miss", phoneme=ps, text=text))
             matched_ids = [0]
 
-        # 截断以保证在 Kokoro 上下文限制之内 (510 tokens)
         if len(matched_ids) > 508:
             matched_ids = matched_ids[:508]
 
-        # 首尾填充 PAD (0)
         token_ids = [0] + matched_ids + [0]
         return np.array([token_ids], dtype=np.int64)
 
 
-# 兼容接口
 def process_text_with_misaki(g2p, text: str, vocab: Optional[Dict[str, int]] = None, **kwargs) -> np.ndarray:
     manager = MultiLangG2P(vocab=vocab)
     manager._g2p_cache["custom"] = g2p
@@ -454,13 +429,13 @@ def process_text_with_misaki(g2p, text: str, vocab: Optional[Dict[str, int]] = N
 
 
 # ===========================================================================
-# 发音人声音与音色多重融合解析 (Voice Manager & Blender)
+# Voice Manager & Blender
 # ===========================================================================
 _BLENDED_VOICES_CACHE: Dict[str, np.ndarray] = {}
 
 
 def load_single_voice_tensor(file_path: Path) -> np.ndarray:
-    """加载单个声音特征向量文件（支持 .bin, .pt, .pth, .npy, .npz）。"""
+    """Load a voice feature tensor file (.bin, .pt, .pth, .npy, .npz)."""
     suffix = file_path.suffix.lower()
 
     if suffix in [".pt", ".pth"]:
@@ -483,7 +458,6 @@ def load_single_voice_tensor(file_path: Path) -> np.ndarray:
                 arr = arr.reshape(-1, 256)
             return arr.astype(np.float32)
         except ImportError:
-            # 未安装 PyTorch 时，直接从 PyTorch zip 文件流中反序列化 float32 字节
             import zipfile
             try:
                 with zipfile.ZipFile(file_path, "r") as z:
@@ -496,7 +470,7 @@ def load_single_voice_tensor(file_path: Path) -> np.ndarray:
                                 return arr
             except Exception:
                 pass
-            raise RuntimeError(f"请安装 PyTorch 以加载 .pt 音色文件: pip install torch")
+            raise RuntimeError("PyTorch is required to load .pt voice files: pip install torch")
 
     elif suffix == ".bin":
         arr = np.fromfile(file_path, dtype=np.float32)
@@ -510,13 +484,13 @@ def load_single_voice_tensor(file_path: Path) -> np.ndarray:
             arr = arr.reshape(-1, 256)
         return arr.astype(np.float32)
 
-    raise ValueError(f"不支持的音色文件格式: {suffix}")
+    raise ValueError(f"Unsupported voice format: {suffix}")
 
 
 def parse_voice_blend(voice_spec: str) -> List[Tuple[str, float]]:
     """
-    解析加权多音色融合语法（与 Kokoro-FastAPI 一致）:
-    例如: 'zf_xiaobei(0.7)+af_heart(0.3)' 或 'zf_xiaobei+af_heart'
+    Parse weighted voice blend syntax (compatible with Kokoro-FastAPI):
+    e.g. 'zf_xiaobei(0.7)+af_heart(0.3)' or 'zf_xiaobei+af_heart'
     """
     if not voice_spec or not voice_spec.strip():
         return []
@@ -541,9 +515,9 @@ def parse_voice_blend(voice_spec: str) -> List[Tuple[str, float]]:
 
 
 def get_or_blend_voice(voices: Dict[str, np.ndarray], voice_spec: Optional[str]) -> np.ndarray:
-    """获取单发音人或根据加权融合表达式实时混合发音人音色。"""
+    """Retrieve or blend voice style vectors."""
     if not voices:
-        raise ValueError("音色库为空，无法获取发音人特征！")
+        raise ValueError("Voice library is empty!")
 
     if not voice_spec or not voice_spec.strip():
         first_key = next(iter(voices))
@@ -551,11 +525,9 @@ def get_or_blend_voice(voices: Dict[str, np.ndarray], voice_spec: Optional[str])
 
     voice_spec = voice_spec.strip()
 
-    # 1. 命中单音色
     if voice_spec in voices:
         return voices[voice_spec]
 
-    # 2. 命中融合缓存
     if voice_spec in _BLENDED_VOICES_CACHE:
         return _BLENDED_VOICES_CACHE[voice_spec]
 
@@ -568,7 +540,6 @@ def get_or_blend_voice(voices: Dict[str, np.ndarray], voice_spec: Optional[str])
         v_name = blend_list[0][0]
         return voices.get(v_name, voices[next(iter(voices))])
 
-    # 3. 线性加权融合
     tensors = []
     weights = []
     for v_name, w in blend_list:
@@ -576,7 +547,7 @@ def get_or_blend_voice(voices: Dict[str, np.ndarray], voice_spec: Optional[str])
             tensors.append(voices[v_name])
             weights.append(w)
         else:
-            logger.warning("未找到混合音色中的发音人 '%s'，已跳过", v_name)
+            logger.warning(t("log.voice_skip", voice=v_name))
 
     if not tensors:
         return voices[next(iter(voices))]
@@ -591,7 +562,7 @@ def get_or_blend_voice(voices: Dict[str, np.ndarray], voice_spec: Optional[str])
         blended += slice_arr * float(w)
 
     _BLENDED_VOICES_CACHE[voice_spec] = blended
-    logger.info("成功创建加权融合音色: '%s' (混合 %d 款声音)", voice_spec, len(tensors))
+    logger.info(t("log.blend_success", spec=voice_spec, count=len(tensors)))
     return blended
 
 
@@ -600,9 +571,7 @@ def resolve_model_and_voices(
     model_path: Optional[str] = None,
     voices_path: Optional[str] = None,
 ) -> Tuple[Path, Dict[str, np.ndarray], Optional[Dict[str, int]]]:
-    """
-    自动递归搜索并解析 Kokoro 模型文件 (.xml / .onnx)、发音人音色列表以及词汇表。
-    """
+    """Search and load Kokoro model (.xml/.onnx), voices, and vocabulary config."""
     candidates = []
     if model_dir:
         candidates.append(Path(model_dir))
@@ -613,7 +582,6 @@ def resolve_model_and_voices(
     if not search_roots:
         search_roots = [Path(".").resolve()]
 
-    # 1. 查找模型文件 (优先 openvino_model.xml)
     target_model_file: Optional[Path] = None
     if model_path and Path(model_path).is_file():
         target_model_file = Path(model_path).resolve()
@@ -622,7 +590,6 @@ def resolve_model_and_voices(
             if root.is_file() and root.suffix in [".xml", ".onnx"]:
                 target_model_file = root
                 break
-            # 优先 openvino_model.xml
             ov_xml = root / "openvino_model.xml"
             if ov_xml.exists():
                 target_model_file = ov_xml
@@ -637,11 +604,10 @@ def resolve_model_and_voices(
                 break
 
     if not target_model_file:
-        raise FileNotFoundError(f"未在候选目录中找到 OpenVINO (.xml) 或 ONNX (.onnx) 模型: {search_roots}")
+        raise FileNotFoundError(f"OpenVINO (.xml) or ONNX model not found in {search_roots}")
 
     model_root = target_model_file.parent
 
-    # 2. 读取 config.json 提取词汇表
     vocab: Optional[Dict[str, int]] = None
     config_candidates = [
         model_root / "config.json",
@@ -655,12 +621,11 @@ def resolve_model_and_voices(
                     cfg = json.load(f)
                     if "vocab" in cfg:
                         vocab = cfg["vocab"]
-                        logger.info("已成功加载 %s 词汇表 (包含 %d 个 tokens)", c_path, len(vocab))
+                        logger.info(t("log.vocab_loaded", path=str(c_path), tokens=len(vocab)))
                         break
             except Exception as e:
-                logger.warning("解析 %s 异常: %s", c_path, e)
+                logger.warning(t("log.config_error", path=str(c_path), error=str(e)))
 
-    # 3. 扫描 voices 目录或打包文件
     voices: Dict[str, np.ndarray] = {}
     voice_sources = []
     if voices_path:
@@ -683,7 +648,7 @@ def resolve_model_and_voices(
                             arr = load_single_voice_tensor(f)
                             voices[v_name] = arr
                         except Exception as e:
-                            logger.debug("跳过音色文件 %s: %s", f.name, e)
+                            logger.debug(t("log.voice_file_skip", name=f.name, error=str(e)))
             if voices:
                 break
         elif src.is_file() and src.suffix in [".npy", ".npz"]:
@@ -698,23 +663,21 @@ def resolve_model_and_voices(
                 if voices:
                     break
             except Exception as e:
-                logger.warning("解析打包音色 %s 异常: %s", src, e)
+                logger.warning(t("log.voice_archive_error", src=str(src), error=str(e)))
 
     if not voices:
-        logger.warning("未在模型目录找到预置音色文件，正在初始化基础虚拟参考音色...")
+        logger.warning(t("log.no_preset_voices"))
         voices["af_heart"] = np.zeros((1, 256), dtype=np.float32)
 
-    logger.info("已加载 %d 款音色 (首个音色: %s)", len(voices), next(iter(voices)))
+    logger.info(t("log.voices_loaded", count=len(voices), first_voice=next(iter(voices))))
     return target_model_file, voices, vocab
 
 
 # ===========================================================================
-# OpenVINO Kokoro 推理引擎封装 (Kokoro OpenVINO Engine)
+# OpenVINO Kokoro Engine Wrapper
 # ===========================================================================
 class KokoroEngine:
-    """
-    基于 OpenVINO 的 Kokoro 核心声学模型推理引擎。
-    """
+    """Kokoro acoustic model inference engine powered by OpenVINO."""
 
     def __init__(
         self,
@@ -726,17 +689,17 @@ class KokoroEngine:
         self.device = device.upper()
         self.threads = threads
 
-        logger.info("正在加载并编译 OpenVINO 模型: %s (设备: %s)", model_file.name, self.device)
+        logger.info(t("log.loading_model", model=model_file.name, device=self.device))
         core = ov.Core()
         model = core.read_model(str(model_file))
 
         ov_config: Dict[str, str] = {"PERFORMANCE_HINT": "LATENCY"}
         if threads and threads > 0:
             ov_config["INFERENCE_NUM_THREADS"] = str(threads)
-            logger.info("已设置 OpenVINO 推理线程数: %d", threads)
+            logger.info(t("log.threads_set", threads=threads))
 
         self.compiled_model = core.compile_model(model, self.device, config=ov_config)
-        logger.info("🎉 OpenVINO 模型就绪 (LATENCY 模式)")
+        logger.info(t("log.model_ready"))
 
     def synthesize_tokens(
         self,
@@ -744,12 +707,9 @@ class KokoroEngine:
         style: np.ndarray,
         speed: float = 1.0,
     ) -> bytes:
-        """
-        执行单次声学模型推理，将 Token IDs 与发音人 Style 向量合成为 16-bit 24kHz PCM 字节流。
-        """
+        """Run acoustic model inference to produce 16-bit 24kHz PCM bytes."""
         token_len = token_ids.shape[1]
 
-        # 匹配对应长度的发音人 Style 向量
         if style.ndim == 2:
             idx = min(token_len, len(style) - 1)
             style_vec = style[idx : idx + 1]
@@ -767,33 +727,28 @@ class KokoroEngine:
 
         speed_array = np.array([float(speed)], dtype=np.float32)
 
-        # Kokoro OpenVINO IR 模型接受固定三入参: [input_ids, ref_s, speed]
         try:
             outputs = self.compiled_model([token_ids, style_vec, speed_array])
         except Exception as e:
-            logger.error("OpenVINO 模型推理失败: %s", e)
+            logger.error(t("log.inference_failed", error=str(e)))
             return b""
 
-        # 提取音频输出 (float32 array, 24000Hz)
         audio = outputs[0]
         if isinstance(audio, np.ndarray):
             audio = audio.flatten()
         else:
             audio = np.array(audio).flatten()
 
-        # 限幅并转为 16-bit 单声道 PCM 格式
         audio = np.clip(audio, -1.0, 1.0)
         pcm_data = (audio * 32767.0).astype(np.int16).tobytes()
         return pcm_data
 
 
 # ===========================================================================
-# Wyoming 协议事件处理与流式分发器
+# Wyoming Event Handler
 # ===========================================================================
 class TTSEventHandler(AsyncEventHandler):
-    """
-    Wyoming TTS 异步事件处理器：实现首句秒级出声的流式响应。
-    """
+    """Wyoming TTS asynchronous event handler with streaming chunk response."""
 
     def __init__(
         self,
@@ -819,25 +774,22 @@ class TTSEventHandler(AsyncEventHandler):
         self.sample_rate = sample_rate
 
     async def handle_event(self, event: Event) -> bool:
-        """处理 Wyoming 客户端发送的协议事件。"""
+        """Handle incoming Wyoming protocol event."""
 
-        # 1. 响应客户端能力查询 (Describe)
         if Describe.is_type(event.type):
             await self.write_event(self.wyoming_info.event())
             return True
 
-        # 2. 响应语音合成请求 (Synthesize)
         if Synthesize.is_type(event.type):
             synth = Synthesize.from_event(event)
             text = (synth.text or "").strip()
 
             if not text:
-                logger.warning("收到空文本，发送静音音频流")
+                logger.warning(t("log.empty_text"))
                 await self.write_event(AudioStart(rate=self.sample_rate, width=2, channels=1).event())
                 await self.write_event(AudioStop().event())
                 return True
 
-            # (1) 检查客户端是否显式传入了 voice 与 language
             explicit_voice = None
             if synth.voice and synth.voice.name:
                 cand = synth.voice.name.strip()
@@ -850,13 +802,6 @@ class TTSEventHandler(AsyncEventHandler):
                 if cand_lang not in ("auto", "none", ""):
                     client_lang = cand_lang
 
-            # (2) 智能确定合成语言（对齐 Kokoro-FastAPI 多语言体系）
-            # 优先级体系：
-            # A. 文本包含日文假名 -> 必定为 ja (日语)！彻底防止日文因默认音色被误判为中文
-            # B. 客户端显式指定了语言 (如 language='ja' 或 'en') -> 以客户端为准
-            # C. 客户端显式指定了发音人 (如 jf_alpha, af_heart) -> 从发音人前缀推导语言
-            # D. 文本内容特征探测 (含汉字且无假名 -> zh, 纯西文字母 -> en)
-            # E. 回退到服务配置的默认语言
             detected_lang = detect_language(text, default_lang=self.default_language)
 
             if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", text):
@@ -865,7 +810,6 @@ class TTSEventHandler(AsyncEventHandler):
                 target_lang = client_lang
             elif explicit_voice:
                 prefix = explicit_voice[0].lower()
-                # 若显式选了中文音色但输入纯英文，自动修正为英文处理
                 if prefix == "z" and re.search(r"^[a-zA-Z0-9\s\.,!\?'-]+$", text.strip()):
                     target_lang = "en"
                 else:
@@ -873,10 +817,6 @@ class TTSEventHandler(AsyncEventHandler):
             else:
                 target_lang = detected_lang
 
-            # (3) 智能匹配/推选发音人：
-            # 若客户端显式指定了发音人，直接使用；
-            # 若客户端未显式指定，且检测出的目标语言与默认音色不匹配（例如目标是 ja，默认音色是 zf_*），
-            # 自动从可用音色库中推选该语言的最佳发音人（如 jf_alpha）！
             if explicit_voice:
                 voice_name = explicit_voice
             else:
@@ -890,7 +830,6 @@ class TTSEventHandler(AsyncEventHandler):
                 else:
                     voice_name = self.default_voice_name
 
-            # (3) 确定语速倍率
             req_speed = self.speed
             if event.data:
                 if "speed" in event.data and isinstance(event.data["speed"], (int, float)):
@@ -899,48 +838,43 @@ class TTSEventHandler(AsyncEventHandler):
                     req_speed = float(event.data["voice"]["speed"])
 
             logger.info(
-                "🎙️ TTS 请求: 语言=%s (检测=%s), 发音人=%s, 语速=%.2f, 文本: %s",
-                target_lang,
-                detected_lang,
-                voice_name,
-                req_speed,
-                text if len(text) <= 50 else text[:47] + "...",
+                t(
+                    "log.request",
+                    lang=target_lang,
+                    detected=detected_lang,
+                    voice=voice_name,
+                    speed=req_speed,
+                    text=text if len(text) <= 50 else text[:47] + "...",
+                )
             )
 
-            # 获取发音人 Style 向量
             voice_style = get_or_blend_voice(self.voices, voice_name)
 
-            # 发送流式音频开始事件
             await self.write_event(
                 AudioStart(
                     rate=self.sample_rate,
-                    width=2,       # 16-bit PCM
-                    channels=1,    # 单声道
+                    width=2,
+                    channels=1,
                 ).event()
             )
 
-            # (4) 智能流式切句与即时生成（Streaming Chunking & Immediate Playback）
-            # 文本被切分为自然的从句小块，首句生成只需约 100ms 立刻开始发声，消除全部卡顿等待！
             chunks = split_text_into_streaming_chunks(text)
-            logger.debug("长文本已切分为 %d 个流式语音从句: %s", len(chunks), chunks)
+            logger.debug(t("log.chunks_split", count=len(chunks), chunks=chunks))
 
             loop = asyncio.get_running_loop()
-            chunk_size = 1024  # 每次网络发送 1024 字节的小音频块
+            chunk_size = 1024
 
             for c_idx, chunk_text in enumerate(chunks, 1):
                 t_start = time.perf_counter()
 
-                # 每个分句的语言自适应判定（中日混合文本的保护）
                 chunk_lang = target_lang
                 if re.search(r"[\u3040-\u309F\u30A0-\u30FF]", chunk_text):
                     chunk_lang = "ja"
                 elif re.search(r"[\u4E00-\u9FFF]", chunk_text) and chunk_lang not in ("ja", "zh"):
                     chunk_lang = "zh"
                 elif re.search(r"^[a-zA-Z0-9\s\.,!\?'-]+$", chunk_text):
-                    # 纯西文字符/纯英文从句
                     chunk_lang = "en"
 
-                # A. 音素与 Token 转换 (在线程池中执行，避免阻塞主循环)
                 tokens = await loop.run_in_executor(
                     None,
                     self.g2p_manager.text_to_tokens,
@@ -951,7 +885,6 @@ class TTSEventHandler(AsyncEventHandler):
                 if tokens.shape[1] <= 2:
                     continue
 
-                # B. OpenVINO 模型推理合成
                 pcm_data = await loop.run_in_executor(
                     None,
                     self.engine.synthesize_tokens,
@@ -964,7 +897,6 @@ class TTSEventHandler(AsyncEventHandler):
                 if not pcm_data:
                     continue
 
-                # C. 边算边播：首句生成完毕立刻推入 Wyoming TCP 音频流
                 for offset in range(0, len(pcm_data), chunk_size):
                     await self.write_event(
                         AudioChunk(
@@ -976,24 +908,25 @@ class TTSEventHandler(AsyncEventHandler):
                     )
 
                 logger.info(
-                    "分句 [%d/%d] 流式输出完成: '%s' (耗时: %.2fs, tokens=%d, 音频: %.2fs)",
-                    c_idx,
-                    len(chunks),
-                    chunk_text[:16].strip(),
-                    t_cost,
-                    tokens.shape[1],
-                    len(pcm_data) / (self.sample_rate * 2),
+                    t(
+                        "log.chunk_output",
+                        index=c_idx,
+                        total=len(chunks),
+                        text=chunk_text[:16].strip(),
+                        time=t_cost,
+                        tokens=tokens.shape[1],
+                        duration=len(pcm_data) / (self.sample_rate * 2),
+                    )
                 )
 
-            # 发送流式音频结束事件
             await self.write_event(AudioStop().event())
-            logger.info("✅ 文本整篇合成与流式分发完成！")
+            logger.info(t("log.synthesis_complete"))
 
         return True
 
 
 # ===========================================================================
-# 主程序入口与服务初始化
+# CLI Entrypoint
 # ===========================================================================
 @app.command()
 def main(
@@ -1001,70 +934,67 @@ def main(
         ...,
         "--model-dir",
         "-m",
-        help="Kokoro OpenVINO 模型目录（含 openvino_model.xml 及 voices/ 目录）",
+        help=t("cli.options.model_dir"),
     ),
     host: str = typer.Option(
         "0.0.0.0",
         "--host",
         "-H",
-        help="服务监听地址",
+        help=t("cli.options.host"),
     ),
     port: int = typer.Option(
         10021,
         "--port",
         "-p",
-        help="服务监听端口（默认 10021）",
+        help=t("cli.options.port"),
     ),
     device: str = typer.Option(
         "CPU",
         "--device",
         "-d",
-        help="OpenVINO 推理设备（默认 CPU，Kokoro 在 CPU 上极快且兼容性最佳）",
+        help=t("cli.options.device"),
     ),
     threads: Optional[int] = typer.Option(
         None,
         "--threads",
         "-t",
-        help="OpenVINO CPU 推理线程数（默认 None 自适应优化）",
+        help=t("cli.options.threads"),
     ),
     language: str = typer.Option(
         "auto",
         "--language",
         "-l",
-        help="全局默认语言（auto / zh / ja / en / es / fr 等）",
+        help=t("cli.options.language"),
     ),
     voice: Optional[str] = typer.Option(
         None,
         "--voice",
         "-v",
-        help="全局默认发音人名称（如 zf_xiaobei, jf_alpha, af_heart，不填则自动推选）",
+        help=t("cli.options.voice"),
     ),
     speed: float = typer.Option(
         0.85,
         "--speed",
         "-s",
-        help="语速倍率（推荐 0.85 获得更从容清丽自然的听感，>1.0 加速，<1.0 减速）",
+        help=t("cli.options.speed"),
     ),
     sample_rate: int = typer.Option(
         24000,
         "--sample-rate",
-        help="音频采样率（Hz），Kokoro 默认 24000",
+        help=t("cli.options.sample_rate"),
     ),
 ) -> None:
-    """启动 Wyoming Kokoro-OpenVINO 极速多语言 TTS 服务。"""
+    """Launch Wyoming Kokoro-OpenVINO ultra-fast multilingual TTS service."""
 
     logger.info("=" * 65)
-    logger.info("🚀 正在启动 Wyoming Kokoro-OpenVINO 多语言 TTS 服务...")
+    logger.info(t("log.starting_service"))
     logger.info("=" * 65)
 
-    # 1. 扫描与解析模型、音色库及词汇表
     model_file, voices, vocab = resolve_model_and_voices(model_dir=model_dir)
 
-    # 2. 选定默认发音人
     all_voice_names = list(voices.keys())
     selected_default_voice = voice
     if not selected_default_voice:
-        # 优先推选中文、日文或英文优质音色
         candidates = (
             [v for v in all_voice_names if v.startswith("zf_") or v.startswith("zm_")]
             + [v for v in all_voice_names if v.startswith("jf_") or v.startswith("jm_")]
@@ -1072,22 +1002,19 @@ def main(
         )
         selected_default_voice = candidates[0] if candidates else all_voice_names[0]
 
-    logger.info("🎙️ 默认发音人: %s (音色库总计: %d 款声音)", selected_default_voice, len(voices))
+    logger.info(t("log.default_voice", voice=selected_default_voice, count=len(voices)))
 
-    # 3. 初始化 OpenVINO 推理引擎
     engine = KokoroEngine(
         model_file=model_file,
         device=device,
         threads=threads,
     )
 
-    # 4. 初始化多语言 G2P 前端
     g2p_manager = MultiLangG2P(
         fallback_language="zh" if language == "auto" else language,
         vocab=vocab,
     )
 
-    # 5. 构建并注册 Wyoming 协议描述元数据（向 Home Assistant 宣告支持的音色与语言）
     tts_attribution = Attribution(
         name="Kokoro TTS (OpenVINO)",
         url="https://github.com/remsky/Kokoro-FastAPI",
@@ -1097,7 +1024,7 @@ def main(
     for v_name in sorted(voices.keys()):
         prefix = v_name[0].lower()
         v_lang = VOICE_PREFIX_TO_LANG.get(prefix, "en")
-        v_desc = f"{v_name} ({LANG_NAMES.get(v_lang, v_lang)})"
+        v_desc = f"{v_name} ({get_lang_display_name(v_lang)})"
         tts_voices.append(
             TtsVoice(
                 name=v_name,
@@ -1110,13 +1037,13 @@ def main(
         )
 
     supported_languages = sorted(list({v.languages[0] for v in tts_voices}))
-    logger.info("🌐 已向 Home Assistant 注册语言体系: %s", ", ".join(supported_languages))
+    logger.info(t("log.ha_registered_langs", langs=", ".join(supported_languages)))
 
     wyoming_info = Info(
         tts=[
             TtsProgram(
                 name="kokoro-openvino",
-                description="Kokoro-82M 多语言语音合成 (OpenVINO 高速推理)",
+                description=t("wyoming.program_description"),
                 attribution=tts_attribution,
                 installed=True,
                 voices=tts_voices,
@@ -1125,24 +1052,22 @@ def main(
         ]
     )
 
-    # 6. 服务冷启动预热（预热 G2P 与 OpenVINO，消除首个请求的编译延迟）
-    logger.info("正在执行后台引擎预热 (Warm-up)...")
+    logger.info(t("log.warmup_start"))
     try:
-        warm_tokens = g2p_manager.text_to_tokens("你好", language="zh")
+        warm_tokens = g2p_manager.text_to_tokens("Hello", language="en")
         warm_style = get_or_blend_voice(voices, selected_default_voice)
         engine.synthesize_tokens(warm_tokens, warm_style, speed=1.0)
-        logger.info("🎉 引擎预热完成！首个请求将实现秒级出声。")
+        logger.info(t("log.warmup_done"))
     except Exception as e:
-        logger.debug("预热跳过或忽略: %s", e)
+        logger.debug(t("log.warmup_skip", error=str(e)))
 
-    # 7. 启动 Wyoming 异步 TCP 服务
     server = AsyncServer.from_uri(f"tcp://{host}:{port}")
     logger.info("=================================================================")
-    logger.info("🌟 Wyoming Kokoro-OpenVINO TTS 服务启动成功！")
-    logger.info("   - 监听地址: tcp://%s:%d", host, port)
-    logger.info("   - 推理设备: %s", device)
-    logger.info("   - 默认语速: %.2f", speed)
-    logger.info("   - 默认音色: %s", selected_default_voice)
+    logger.info(t("log.service_ready"))
+    logger.info(t("log.listen_addr", host=host, port=port))
+    logger.info(t("log.device_info", device=device))
+    logger.info(t("log.speed_info", speed=speed))
+    logger.info(t("log.voice_info", voice=selected_default_voice))
     logger.info("=================================================================")
 
     try:
@@ -1163,7 +1088,7 @@ def main(
             )
         )
     except KeyboardInterrupt:
-        logger.info("服务已被手动停止。")
+        logger.info(t("log.service_stopped"))
 
 
 if __name__ == "__main__":

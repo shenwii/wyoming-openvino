@@ -1,0 +1,33 @@
+cli:
+  help: "Wyoming STT Service - OpenVINO Whisper Speech Recognition"
+  options:
+    model_dir: "OpenVINO Whisper model directory path (containing exported .xml/.bin and tokenizer files)"
+    host: "Server listening host address"
+    port: "Server listening port"
+    device: "OpenVINO inference device (CPU / GPU / AUTO / MULTI:CPU,GPU)"
+    language: "Default recognition language code (default 'auto'; Wyoming protocol requests take priority)"
+    to_simplified: "Force output in Simplified Chinese under Chinese recognition mode (defaults to Traditional Chinese)"
+    model_name: "Model name for Wyoming service discovery and Home Assistant display"
+    log_level: "Logging level (DEBUG / INFO / WARNING / ERROR)"
+
+log:
+  opencc_python_loaded: "Successfully loaded Python opencc library"
+  opencc_system_loaded: "Successfully loaded system libopencc via ctypes ({lib_name})"
+  opencc_failed: "OpenCC conversion exception: {error}"
+  opencc_not_found: "No opencc library detected, simplified/traditional conversion inactive. Recommended: pip install opencc-python-reimplemented"
+  protocol_lang_specified: "Wyoming protocol specified language: {lang}"
+  protocol_lang_default: "Wyoming protocol did not specify language, using default/auto: {lang}"
+  empty_audio: "Received empty audio data, skipping transcription"
+  transcription_result: "Transcription result (language={lang}): {text}"
+  loading_model: "Loading Whisper model: {path}"
+  inference_device: "Inference device: {device}"
+  default_lang_strategy: "Default language strategy: {lang} (Wyoming protocol requests take priority)"
+  chinese_strategy: "Chinese simplified/traditional strategy: {strategy}"
+  forced_simplified: "Forced Simplified (--to-simplified)"
+  default_traditional: "Default Traditional"
+  model_loaded: "Model loaded successfully"
+  service_started: "STT service started: {host}:{port} (default: {lang}, protocol specified & auto-detect supported)"
+
+wyoming:
+  program_description: "OpenVINO-based {model_name} multilingual speech recognition service (Auto-detect & zh/en/ja/ko supported)"
+  model_description: "OpenVINO {model_name} (Auto/Multilingual)"

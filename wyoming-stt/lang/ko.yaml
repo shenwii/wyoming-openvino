@@ -1,0 +1,33 @@
+cli:
+  help: "Wyoming STT 서비스 - OpenVINO Whisper 다국어 음성 인식"
+  options:
+    model_dir: "OpenVINO Whisper 모델 디렉터리 경로 (.xml/.bin 및 tokenizer 파일 포함)"
+    host: "서버 수신 호스트 주소"
+    port: "서버 수신 포트"
+    device: "OpenVINO 추론 장치 (CPU / GPU / AUTO / MULTI:CPU,GPU)"
+    language: "기본 인식 언어 코드 (기본값 'auto', Wyoming 프로토콜 요청 우선)"
+    to_simplified: "중국어 인식 모드에서 간체자 출력 강제 (기본값은 번체자)"
+    model_name: "Wyoming 서비스 검색 및 Home Assistant 표시용 모델 이름"
+    log_level: "로그 레벨 (DEBUG / INFO / WARNING / ERROR)"
+
+log:
+  opencc_python_loaded: "Python opencc 라이브러리를 성공적으로 로드했습니다"
+  opencc_system_loaded: "ctypes를 통해 시스템 libopencc를 성공적으로 로드했습니다 ({lib_name})"
+  opencc_failed: "OpenCC 변환 예외 발생: {error}"
+  opencc_not_found: "사용 가능한 opencc 라이브러리가 감지되지 않아 간체/번체 변환이 비활성화되었습니다. 권장: pip install opencc-python-reimplemented"
+  protocol_lang_specified: "Wyoming 프로토콜 지정 언어: {lang}"
+  protocol_lang_default: "Wyoming 프로토콜에서 언어가 지정되지 않아 기본값/자동 감지를 사용합니다: {lang}"
+  empty_audio: "빈 오디오 데이터를 수신하여 인식을 건너뜁니다"
+  transcription_result: "인식 결과 (언어={lang}): {text}"
+  loading_model: "Whisper 모델 로드 중: {path}"
+  inference_device: "추론 장치: {device}"
+  default_lang_strategy: "기본 언어 정책: {lang} (Wyoming 프로토콜 요청 우선)"
+  chinese_strategy: "중국어 간체/번체 정책: {strategy}"
+  forced_simplified: "간체자 강제 (--to-simplified)"
+  default_traditional: "기본 번체자"
+  model_loaded: "모델 로드가 완료되었습니다"
+  service_started: "STT 서비스 시작됨: {host}:{port} (기본: {lang}, 프로토콜 지정 및 자동 감지 지원)"
+
+wyoming:
+  program_description: "OpenVINO 기반 {model_name} 다국어 음성 인식 서비스 (자동 감지 및 한/영/중/일 등 지원)"
+  model_description: "OpenVINO {model_name} (자동/다국어)"

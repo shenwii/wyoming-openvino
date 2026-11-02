@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Wyoming STT 服务
-================
-基于 OpenVINO 加速的 Whisper 语音识别服务，通过 Wyoming 协议对接 Home Assistant。
+Wyoming STT Service
+===================
+OpenVINO-accelerated Whisper speech recognition service interfacing with Home Assistant
+via the standard Wyoming protocol.
 
-多语言与简繁支持机制:
-    - 语言优先采用 Wyoming 协议在请求中指定的语言（如 Home Assistant 语音助理配置的语言）
-    - 若 Wyoming 协议未指定或命令行设为 auto/不传，Whisper 模型将自动检测输入的语言
-    - 原生支持中文 (zh)、英语 (en)、日语 (ja) 以及 Whisper 的 90+ 种多国语言
-    - 中文简繁转换控制: 传入 --to-simplified 参数时强制输出简体中文；未传入时默认输出繁体中文
+Multilingual and Simplified/Traditional Support:
+    - Protocol Priority: Honors language specified by Wyoming client requests (e.g. Home Assistant voice assistant pipeline).
+    - Auto-detection: If not specified by protocol or set to auto/none, Whisper automatically detects language.
+    - Native support for English (en), Chinese (zh), Japanese (ja), Korean (ko), and Whisper's 90+ languages.
+    - Chinese Conversion: Use --to-simplified to force Simplified Chinese output; defaults to Traditional Chinese.
 
-使用示例:
-    # 强制输出简体中文 (推荐普通话用户)
+Usage Examples:
+    # Force Simplified Chinese output
     python wyoming-stt.py --model-dir ./whisper-openvino --device GPU --to-simplified
 
-    # 默认繁体中文输出
+    # Default output
     python wyoming-stt.py --model-dir ./whisper-openvino --device GPU
 """
 
@@ -35,13 +36,16 @@ from wyoming.event import Event
 from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info
 from wyoming.server import AsyncEventHandler, AsyncServer
 
+from i18n import t
+
 # ---------------------------------------------------------------------------
-# 日志
+# Logging configuration
 # ---------------------------------------------------------------------------
 logger = logging.getLogger("wyoming-stt")
 
 # ---------------------------------------------------------------------------
-# 中文繁简转换 (优先使用 opencc 库，其次回退至系统 libopencc，均无则警告)
+# Chinese Simplified / Traditional conversion
+# (Tries python-opencc first, falls back to system libopencc, or logs a warning)
 # ---------------------------------------------------------------------------
 _opencc_t2s = None
 _opencc_s2t = None
@@ -49,21 +53,21 @@ _opencc_warned = False
 
 
 def _init_opencc() -> None:
-    """初始化繁简转换器。"""
+    """Initialize OpenCC converter for Simplified/Traditional Chinese."""
     global _opencc_t2s, _opencc_s2t
 
-    # 1. 尝试导入 python 绑定库
+    # 1. Attempt to import python binding library
     try:
         import opencc
 
         _opencc_t2s = opencc.OpenCC("t2s.json")
         _opencc_s2t = opencc.OpenCC("s2t.json")
-        logger.debug("成功加载 Python opencc 繁简转换库")
+        logger.debug(t("log.opencc_python_loaded"))
         return
     except Exception:
         pass
 
-    # 2. 尝试通过 ctypes 加载系统 libopencc 共享库
+    # 2. Attempt to load system libopencc via ctypes
     for lib_name in (
         "libopencc.so.1.4",
         "libopencc.so.1",
@@ -111,7 +115,7 @@ def _init_opencc() -> None:
 
                 _opencc_t2s = _CtypesConverter(t2s_desc, lib)
                 _opencc_s2t = _CtypesConverter(s2t_desc, lib)
-                logger.debug("成功通过 ctypes 加载系统 libopencc 动态库 (%s)", lib_name)
+                logger.debug(t("log.opencc_system_loaded", lib_name=lib_name))
                 return
         except Exception:
             continue
@@ -121,7 +125,7 @@ _init_opencc()
 
 
 def is_chinese_text(text: str) -> bool:
-    """判断文本是否包含汉字且不含日文平假名/片假名。"""
+    """Check if the text contains Chinese characters and no Japanese Hiragana/Katakana."""
     has_han = bool(re.search(r"[\u4e00-\u9fff]", text))
     has_kana = bool(re.search(r"[\u3040-\u309f\u30a0-\u30ff]", text))
     return has_han and not has_kana
@@ -129,11 +133,11 @@ def is_chinese_text(text: str) -> bool:
 
 def convert_chinese(text: str, to_simplified: bool = False) -> str:
     """
-    对中文文本进行繁简转换。
+    Convert Chinese text between Traditional and Simplified.
 
-    参数:
-        text: 待转换的原始文本
-        to_simplified: True 则强制转换为简体中文；False 则转换为繁体中文
+    Args:
+        text: Original text to convert.
+        to_simplified: True to force Simplified Chinese, False for Traditional.
     """
     global _opencc_warned
     if not text:
@@ -144,23 +148,22 @@ def convert_chinese(text: str, to_simplified: bool = False) -> str:
         try:
             return converter.convert(text)
         except Exception as e:
-            logger.warning("繁简转换执行异常: %s", e)
+            logger.warning(t("log.opencc_failed", error=str(e)))
             return text
 
     if not _opencc_warned:
-        logger.warning(
-            "未检测到可用 opencc 库，繁简转换未生效。建议安装: pip install opencc-python-reimplemented"
-        )
+        logger.warning(t("log.opencc_not_found"))
         _opencc_warned = True
 
     return text
 
-# ---------------------------------------------------------------------------
-# Typer 命令行应用
-# ---------------------------------------------------------------------------
-app = typer.Typer(help="Wyoming STT 服务 - 基于 OpenVINO 的多语言语音识别")
 
-# Whisper 常用多语言列表（向 Home Assistant 宣告）
+# ---------------------------------------------------------------------------
+# Typer CLI application
+# ---------------------------------------------------------------------------
+app = typer.Typer(help=t("cli.help"))
+
+# Common Whisper languages announced to Home Assistant
 COMMON_LANGUAGES = [
     "zh", "en", "ja", "ko", "de", "fr", "es", "ru", "it", "pt",
     "nl", "tr", "pl", "sv", "vi", "th", "ar", "hi", "el", "cs",
@@ -168,17 +171,17 @@ COMMON_LANGUAGES = [
 
 
 # ===========================================================================
-# Wyoming 事件处理器
+# Wyoming Event Handler
 # ===========================================================================
 class STTEventHandler(AsyncEventHandler):
     """
-    Wyoming STT 事件处理器。
+    Wyoming STT Event Handler.
 
-    处理来自 Wyoming 客户端的语音识别请求:
-        1. 收到 Describe 事件   → 返回服务及支持的语言列表
-        2. 收到 Transcribe 事件 → 提取客户端指定的语言（若有），重置音频缓冲区
-        3. 收到 AudioChunk 事件 → 追加音频数据到缓冲区
-        4. 收到 AudioStop 事件  → 调用 OpenVINO 进行推理并返回识别结果
+    Handles speech recognition requests from Wyoming clients:
+        1. Describe event   -> Returns service info and supported languages
+        2. Transcribe event -> Extracts client-requested language, resets audio buffer
+        3. AudioChunk event -> Appends PCM audio chunks to buffer
+        4. AudioStop event  -> Invokes OpenVINO Whisper inference and returns transcript
     """
 
     def __init__(
@@ -190,61 +193,45 @@ class STTEventHandler(AsyncEventHandler):
         to_simplified: bool = False,
         **kwargs,
     ) -> None:
-        """
-        初始化 STT 事件处理器。
-
-        参数:
-            wyoming_info:     Wyoming 服务描述信息
-            pipeline:         OpenVINO Whisper 推理管线
-            default_language: 默认识别语言代码（如 auto / zh / en / ja）
-            to_simplified:    中文识别模式下是否强制转换为简体中文（默认 False 为繁体中文）
-        """
         super().__init__(*args, **kwargs)
         self.wyoming_info = wyoming_info
         self.pipeline = pipeline
         self.default_language = (default_language or "auto").strip().lower()
         self.to_simplified = to_simplified
         self.current_language: str = self.default_language
-        # 音频缓冲区，用于累积接收到的 PCM 音频数据
         self.audio_buffer = bytearray()
 
     async def handle_event(self, event: Event) -> bool:
-        """处理 Wyoming 协议事件。"""
+        """Process an incoming Wyoming protocol event."""
 
         if Describe.is_type(event.type):
-            # ---- 服务描述请求 ----
             await self.write_event(self.wyoming_info.event())
 
         elif Transcribe.is_type(event.type):
-            # ---- 转录请求开始 ----
             transcribe = Transcribe.from_event(event)
-            # 优先使用客户端在 Wyoming 协议中指定的语言
             if transcribe.language:
                 self.current_language = transcribe.language.strip().lower()
-                logger.info("Wyoming 协议指定识别语言: %s", self.current_language)
+                logger.info(t("log.protocol_lang_specified", lang=self.current_language))
             else:
                 self.current_language = self.default_language
-                logger.info("Wyoming 协议未指定语言，使用默认/自动检测: %s", self.current_language)
+                logger.info(t("log.protocol_lang_default", lang=self.current_language))
 
-            # 清空缓冲区，准备接收新的音频流
             self.audio_buffer = bytearray()
 
         elif AudioChunk.is_type(event.type):
-            # ---- 接收音频数据块 ----
             chunk = AudioChunk.from_event(event)
             self.audio_buffer.extend(chunk.audio)
 
         elif AudioStop.is_type(event.type):
-            # ---- 音频接收完毕，执行语音识别 ----
             if not self.audio_buffer:
-                logger.warning("收到空的音频数据，跳过识别")
+                logger.warning(t("log.empty_audio"))
                 await self.write_event(Transcript(text="").event())
             else:
                 text = await self.call_openvino(
                     self.audio_buffer,
                     language=self.current_language,
                 )
-                logger.info("识别结果 (语言=%s): %s", self.current_language, text)
+                logger.info(t("log.transcription_result", lang=self.current_language, text=text))
                 await self.write_event(Transcript(text=text).event())
 
         return True
@@ -254,51 +241,26 @@ class STTEventHandler(AsyncEventHandler):
         audio_bytes: bytearray,
         language: Optional[str] = None,
     ) -> str:
-        """
-        使用 OpenVINO Whisper 模型进行语音识别。
-
-        处理流程:
-            1. 将 16-bit PCM 原始音频转换为 float32 归一化数组
-            2. 配置 Whisper 生成参数:
-               - 若指定了语言代码（如 zh / en / ja），传入 <|zh|> 进行针对性识别
-               - 若语言为 "auto" 或空，清空语言限制，由 Whisper 原生自动检测语言
-               - 若为中文模式，注入 initial_prompt 进行简繁提示引导
-            3. 在线程池中执行推理
-            4. 对中文输出执行繁简规范化（--to-simplified 强制简体，否则默认繁体）
-            5. 返回识别文本
-
-        参数:
-            audio_bytes: 16-bit PCM 格式的原始音频数据（16kHz 采样率）
-            language:    识别语言（zh / en / ja / auto 等）
-
-        返回:
-            识别出的文本字符串
-        """
-        # 将 16-bit PCM 音频转换为 float32，范围归一化到 [-1.0, 1.0]
+        """Execute speech recognition using OpenVINO Whisper model."""
         audio_array = (
             np.frombuffer(bytes(audio_bytes), dtype=np.int16).astype(np.float32)
             / 32768.0
         )
 
         raw_lang = (language or self.default_language or "auto").strip().lower()
-        # 兼容地区子标签（如 zh-cn, zh-tw 提取主语言 zh）
         target_lang = raw_lang.split("-")[0].split("_")[0]
         is_chinese = (target_lang == "zh")
 
-        # 配置 Whisper 生成参数
         config = self.pipeline.get_generation_config()
         config.max_new_tokens = 448
         config.task = "transcribe"
 
         if target_lang and target_lang != "auto":
-            # 客户端或配置显式指定了语言，例如 <|zh|>, <|en|>, <|ja|>
             config.language = f"<|{target_lang}|>"
         else:
-            # 自动模式：清空语言指定，触发 Whisper 原生自动语种检测
             if hasattr(config, "language"):
                 config.language = ""
 
-        # 中文模式下注入 prompt 引导解码器
         if is_chinese:
             prompt = (
                 "以下是普通话句子，请用简体中文输出。"
@@ -315,7 +277,6 @@ class STTEventHandler(AsyncEventHandler):
             elif hasattr(config, "prompt"):
                 config.prompt = ""
 
-        # 在线程池中执行推理，避免阻塞事件循环
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None, self.pipeline.generate, audio_array, config
@@ -323,8 +284,6 @@ class STTEventHandler(AsyncEventHandler):
 
         text = result.texts[0].strip() if result.texts else ""
 
-        # 中文繁简处理逻辑：
-        # 若指定了 zh，或者 auto 模式下检测到纯正中文（包含汉字且不含日文假名）
         if is_chinese or (target_lang == "auto" and is_chinese_text(text)):
             text = convert_chinese(text, to_simplified=self.to_simplified)
 
@@ -332,7 +291,7 @@ class STTEventHandler(AsyncEventHandler):
 
 
 # ===========================================================================
-# 命令行入口
+# CLI Entrypoint
 # ===========================================================================
 @app.command()
 def main(
@@ -340,81 +299,82 @@ def main(
         ...,
         "--model-dir",
         "-m",
-        help="OpenVINO Whisper 模型目录路径（需包含导出的 .xml/.bin 及 tokenizer 文件）",
+        help=t("cli.options.model_dir"),
     ),
     host: str = typer.Option(
         "0.0.0.0",
         "--host",
-        help="服务监听地址",
+        help=t("cli.options.host"),
     ),
     port: int = typer.Option(
         10020,
         "--port",
         "-p",
-        help="服务监听端口",
+        help=t("cli.options.port"),
     ),
     device: str = typer.Option(
         "GPU",
         "--device",
         "-d",
-        help="OpenVINO 推理设备（CPU / GPU / AUTO / MULTI:CPU,GPU）",
+        help=t("cli.options.device"),
     ),
     language: Optional[str] = typer.Option(
         "auto",
         "--language",
         "-l",
-        help="默认识别语言代码（默认为 auto 自动检测；若 Wyoming 协议传入了语言则优先遵循协议）",
+        help=t("cli.options.language"),
     ),
     to_simplified: bool = typer.Option(
         False,
         "--to-simplified",
-        help="中文识别模式下强制输出简体中文（未指定时默认为繁体中文）",
+        help=t("cli.options.to_simplified"),
     ),
     model_name: str = typer.Option(
         "whisper",
         "--model-name",
-        help="模型名称，用于 Wyoming 服务发现和 Home Assistant 显示",
+        help=t("cli.options.model_name"),
     ),
     log_level: str = typer.Option(
         "INFO",
         "--log-level",
-        help="日志级别（DEBUG / INFO / WARNING / ERROR）",
+        help=t("cli.options.log_level"),
     ),
 ) -> None:
-    """启动基于 OpenVINO 的 Wyoming STT 服务，支持自动语种检测、Wyoming 协议动态指定语言与中文简繁输出控制。"""
+    """Launch OpenVINO-based Wyoming STT service with automatic language detection, dynamic protocol language switching, and Chinese character conversion."""
 
-    # 初始化日志系统
+    # Initialize logging
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
     lang_setting = language or "auto"
-    logger.info("正在加载 Whisper 模型: %s", model_dir)
-    logger.info("推理设备: %s", device)
-    logger.info("默认语言策略: %s (优先遵循 Wyoming 协议请求)", lang_setting)
+    logger.info(t("log.loading_model", path=model_dir))
+    logger.info(t("log.inference_device", device=device))
+    logger.info(t("log.default_lang_strategy", lang=lang_setting))
     logger.info(
-        "中文简繁策略: %s",
-        "强制简体 (--to-simplified)" if to_simplified else "默认繁体",
+        t(
+            "log.chinese_strategy",
+            strategy=t("log.forced_simplified") if to_simplified else t("log.default_traditional"),
+        )
     )
 
-    # ---- 初始化 OpenVINO Whisper 推理管线 ----
+    # ---- Initialize OpenVINO Whisper Pipeline ----
     pipeline = openvino_genai.WhisperPipeline(str(model_dir), device)
-    logger.info("模型加载完毕")
+    logger.info(t("log.model_loaded"))
 
-    # ---- 构建 Wyoming 服务信息 ----
-    # 宣告完整语言列表，使 Home Assistant 任意语言管线均可对接本服务
+    # ---- Build Wyoming Service Metadata ----
     wyoming_info = Info(
         asr=[
             AsrProgram(
                 name="wyoming-openvino-stt",
-                description=f"基于 OpenVINO 的 {model_name} 多语言语音识别服务 (支持自动检测及中/英/日等)",
+                description=t("wyoming.program_description", model_name=model_name),
                 installed=True,
                 version="1.0.0",
                 models=[
                     AsrModel(
                         name=model_name,
-                        description=f"OpenVINO {model_name} (Auto/Multilingual)",
+                        description=t("wyoming.model_description", model_name=model_name),
                         languages=COMMON_LANGUAGES,
                         attribution=Attribution(
                             name="OpenAI Whisper (OpenVINO)",
@@ -432,9 +392,11 @@ def main(
         ],
     )
 
-    # ---- 启动 Wyoming 异步服务 ----
+    # ---- Launch Wyoming Async Server ----
     server = AsyncServer.from_uri(f"tcp://{host}:{port}")
-    logger.info("STT 服务启动: %s:%d (默认: %s，支持协议指定与自动识别)", host, port, lang_setting)
+    logger.info(
+        t("log.service_started", host=host, port=port, lang=lang_setting)
+    )
 
     asyncio.run(
         server.run(

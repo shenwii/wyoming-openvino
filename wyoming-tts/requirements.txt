@@ -1,0 +1,49 @@
+# ===========================================================================
+# Wyoming TTS (Text-to-Speech - Kokoro OpenVINO Multilingual) Dependencies
+# ===========================================================================
+
+# Wyoming protocol core library
+wyoming>=1.5.0
+
+# Intel OpenVINO core inference engine
+openvino>=2024.0
+
+# PyTorch (for parsing Kokoro voice weight tensors)
+torch
+
+# Kokoro TTS frontend & multilingual support
+kokoro>=0.8.4
+misaki[en,ja,zh]>=0.4.0
+
+# Audio and scientific computing
+numpy>=1.24.0
+soundfile
+
+# CLI argument parsing
+typer>=0.9.0
+
+# YAML configuration and i18n support
+pyyaml>=6.0
+
+# ---- English language dependencies (en: US 'a' / UK 'b') ----
+spacy
+num2words
+
+# ---- Chinese language dependencies (zh / z) ----
+ordered-set
+pypinyin
+pypinyin-dict
+jieba
+cn2an
+
+# ---- Japanese language dependencies (ja / j) ----
+pyopenjtalk
+fugashi
+unidic-lite
+jaconv
+mojimoji
+
+# Note: espeak-ng is used for es, fr, it, pt, hi language support:
+#   - Debian / Ubuntu: sudo apt install -y espeak-ng
+#   - Fedora / RHEL:   sudo dnf install -y espeak-ng
+#   - Arch Linux:      sudo pacman -S espeak-ng
