@@ -12,7 +12,6 @@ cli:
     sample_rate: "音声サンプリングレート (Hz、Kokoro デフォルト 24000)"
     cache_dir: "OpenVINO モデルコンパイルの永続キャッシュディレクトリ (デフォルトはモデル配下の .ov_cache)"
     max_chunk_chars: "ストリーミング文分割の最大文字数 (デフォルト 65)"
-    bucket_shapes: "入力シェイプの強制バケッティングを有効化（GPUモードではJIT再コンパイル遅延を防ぐためデフォルトで自動有効）"
 
 log:
   pipeline_frontend: "Kokoro ネイティブ KPipeline フロントエンドを使用 (lang_code={lang_code}, model=False)"
@@ -45,8 +44,6 @@ log:
   default_voice: "🎙️ デフォルト話者: {voice} (音色ライブラリ合計: {count} 種)"
   ha_registered_langs: "🌐 Home Assistant に言語エコシステムを登録しました: {langs}"
   cache_dir_info: "永続キャッシュディレクトリ: {path}"
-  bucketing_info: "シェイプバケッティング: {status} (バケット: {buckets})"
-  gpu_bucket_warmup: "⚡ GPU用に固定シェイプバケットカーネルを事前ウォームアップ中 (バケット: {buckets})..."
   gpu_warmup: "⚡ GPUデバイスを検出しました。マルチスケール動的シェイプ事前ウォームアップを実行中..."
   gpu_warmup_done: "🎉 GPUマルチスケールカーネルの事前ウォームアップとキャッシュ構築が完了しました！"
   hetero_gpu_tip: "💡 ヒント: GPUドライバがサポートされている場合は純粋な --device GPU を優先すると異種デバイス間のメモリコピーを削減できます。"

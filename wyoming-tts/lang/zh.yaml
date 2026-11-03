@@ -12,7 +12,6 @@ cli:
     sample_rate: "音频采样率（Hz），Kokoro 默认 24000"
     cache_dir: "OpenVINO 模型编译持久化缓存目录（默认存放在模型目录下的 .ov_cache 目录中）"
     max_chunk_chars: "流式分句最大字符长度（默认 65，中文推荐 50-80，英文推荐 60-100）"
-    bucket_shapes: "是否启用输入 Shape 强制分桶（GPU 模式下默认自动开启以彻底杜绝 JIT 重编译卡顿）"
 
 log:
   pipeline_frontend: "使用 Kokoro 原生 KPipeline 前端 (lang_code={lang_code}, model=False)"
@@ -45,8 +44,6 @@ log:
   default_voice: "🎙️ 默认发音人: {voice} (音色库总计: {count} 款声音)"
   ha_registered_langs: "🌐 已向 Home Assistant 注册语言体系: {langs}"
   cache_dir_info: "持久化模型缓存: {path}"
-  bucketing_info: "Shape 分桶机制: {status} (档位: {buckets})"
-  gpu_bucket_warmup: "⚡ 正在为 GPU 预热所有固定尺寸分桶内核 (档位: {buckets})..."
   gpu_warmup: "⚡ 检测到 GPU 设备，正在执行多尺度动态维度预热 (编译并缓存 GPU 内核)..."
   gpu_warmup_done: "🎉 GPU 多尺度内核预热与持久化缓存构建完成！"
   hetero_gpu_tip: "💡 提示：如果 GPU 驱动完整且算子兼容，推荐优先尝试纯 --device GPU，可避免异构跨设备拆分和内存拷贝损耗。"

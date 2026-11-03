@@ -12,7 +12,6 @@ cli:
     sample_rate: "Audio sample rate in Hz (Kokoro default 24000)"
     cache_dir: "OpenVINO model compilation persistent cache directory (defaults to .ov_cache inside model dir)"
     max_chunk_chars: "Streaming text clause maximum character length (default 65; zh 50-80, en 60-100)"
-    bucket_shapes: "Enable input shape bucketing (defaults to True on GPU to eliminate JIT compilation pauses)"
 
 log:
   pipeline_frontend: "Using Kokoro native KPipeline frontend (lang_code={lang_code}, model=False)"
@@ -45,8 +44,6 @@ log:
   default_voice: "🎙️ Default voice: {voice} (voice library total: {count} voices)"
   ha_registered_langs: "Registered language ecosystem with Home Assistant: {langs}"
   cache_dir_info: "Model compilation cache directory: {path}"
-  bucketing_info: "Shape bucketing: {status} (buckets: {buckets})"
-  gpu_bucket_warmup: "⚡ Warming up all fixed shape bucket kernels on GPU (buckets: {buckets})..."
   gpu_warmup: "⚡ GPU device detected, executing multi-scale dynamic shape warm-up (compiling & caching GPU kernels)..."
   gpu_warmup_done: "🎉 GPU multi-scale kernel warm-up and persistent cache build complete!"
   hetero_gpu_tip: "💡 Tip: If GPU drivers and operators are fully supported, try pure --device GPU to avoid heterogeneous cross-device memory copying."
