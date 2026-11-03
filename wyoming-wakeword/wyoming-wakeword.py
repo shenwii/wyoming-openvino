@@ -34,7 +34,7 @@ Usage Examples:
 """
 
 import asyncio
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 import json
 import logging
@@ -108,6 +108,7 @@ class SingleModelConfig:
     phrase: Optional[str] = None
     cutoff: Optional[float] = None
     refractory: Optional[float] = None
+    trigger_level: Optional[int] = None
     device: Optional[str] = None
     languages: List[str] = field(default_factory=lambda: ["en"])
 
@@ -121,6 +122,7 @@ class WakewordServerConfig:
     default_device: str = "NPU"
     default_cutoff: float = 0.5
     default_refractory: float = 2.0
+    default_trigger_level: int = 1
     melspec_model_path: Optional[str] = None
     melspec_device: Optional[str] = None
     embedding_model_path: Optional[str] = None
@@ -280,6 +282,7 @@ class LoadedClassifier:
         is_end_to_end: bool = False,
         effective_cutoff: float = 0.5,
         effective_refractory: float = 2.0,
+        trigger_level: int = 1,
     ) -> None:
         self.config = config
         self.compiled_model = compiled_model
@@ -288,6 +291,7 @@ class LoadedClassifier:
         self.is_end_to_end = is_end_to_end
         self._effective_cutoff = effective_cutoff
         self._effective_refractory = effective_refractory
+        self._trigger_level = max(1, int(trigger_level))
         self.last_triggered_time: float = 0.0
 
     @property
@@ -307,6 +311,14 @@ class LoadedClassifier:
         self._effective_cutoff = value
 
     @property
+    def trigger_level(self) -> int:
+        return self._trigger_level
+
+    @trigger_level.setter
+    def trigger_level(self, value: int) -> None:
+        self._trigger_level = max(1, int(value))
+
+    @property
     def refractory(self) -> float:
         return self._effective_refractory
 
@@ -321,9 +333,9 @@ class LoadedClassifier:
             return float(out[0, 1])
         return float(out.flat[0])
 
-    def check_trigger(self, score: float, current_time: float) -> bool:
-        """Check if score meets threshold and adheres to refractory period."""
-        if score >= self.cutoff:
+    def check_trigger(self, score: float, current_time: float, current_hits: int = 1) -> bool:
+        """Check if score meets threshold and adheres to trigger level & refractory period."""
+        if score >= self.cutoff and current_hits >= self.trigger_level:
             if current_time - self.last_triggered_time >= self.refractory:
                 self.last_triggered_time = current_time
                 return True
@@ -454,6 +466,7 @@ class WakeWordEngine:
         device = m_cfg.device or self.config.default_device
         cutoff = m_cfg.cutoff if m_cfg.cutoff is not None else self.config.default_cutoff
         refractory = m_cfg.refractory if m_cfg.refractory is not None else self.config.default_refractory
+        trigger_level = m_cfg.trigger_level if m_cfg.trigger_level is not None else self.config.default_trigger_level
 
         path = Path(m_cfg.model_path).expanduser().resolve()
         if not path.exists():
@@ -512,6 +525,7 @@ class WakeWordEngine:
             is_end_to_end=is_e2e,
             effective_cutoff=cutoff,
             effective_refractory=refractory,
+            trigger_level=trigger_level,
         )
         self.classifiers[m_cfg.name] = classifier
         logger.info(
@@ -520,6 +534,7 @@ class WakeWordEngine:
                 name=classifier.name,
                 phrase=classifier.phrase,
                 cutoff=classifier.cutoff,
+                trigger_level=classifier.trigger_level,
                 refractory=classifier.refractory,
                 device=classifier.actual_device,
             )
@@ -547,6 +562,7 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
         self.raw_audio_buffer = bytearray()
         self.melspec_buffer = np.zeros((MEL_HISTORY_FRAMES, 32), dtype=np.float32)
         self.embedding_buffer = np.zeros((DEFAULT_CONTEXT_LEN, EMBEDDING_DIM), dtype=np.float32)
+        self.model_hits: Dict[str, int] = defaultdict(int)
         self.has_detected = False
 
     async def handle_event(self, event: Event) -> bool:
@@ -630,6 +646,7 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
         self.raw_audio_buffer.clear()
         self.melspec_buffer.fill(0)
         self.embedding_buffer.fill(0)
+        self.model_hits.clear()
         self.has_detected = False
 
     def _on_detected_cooldown(self) -> None:
@@ -665,10 +682,20 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                     inp_emb = emb_window.reshape(1, model.context_len, EMBEDDING_DIM)
                     score = model.predict(inp_emb)
 
-            if score > 0.05:
-                logger.debug(t("log.frame_score", name=model.name, score=score, cutoff=model.cutoff))
+            if score >= model.cutoff:
+                self.model_hits[model.name] += 1
+            else:
+                self.model_hits[model.name] = 0
 
-            if model.check_trigger(score, now):
+            hits = self.model_hits[model.name]
+            if score > 0.05 or hits > 0:
+                logger.debug(
+                    "Model [%s] score: %.4f (cutoff: %.2f, hits: %d/%d)",
+                    model.name, score, model.cutoff, hits, model.trigger_level
+                )
+
+            if model.check_trigger(score, now, current_hits=hits):
+                self.model_hits[model.name] = 0
                 return model
 
         return None
@@ -682,6 +709,15 @@ def _safe_float(val, default: float) -> float:
         return default
     try:
         return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val, default: int) -> int:
+    if val is None:
+        return default
+    try:
+        return int(val)
     except (ValueError, TypeError):
         return default
 
@@ -734,6 +770,9 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
     default_refractory = _safe_float(
         raw_dict.get("default_refractory") or raw_dict.get("refractory"), 2.0
     )
+    default_trigger_level = _safe_int(
+        raw_dict.get("default_trigger_level") or raw_dict.get("trigger_level"), 1
+    )
 
     melspec_model = feat_sec.get("melspec_model") or raw_dict.get("melspec_model")
     melspec_device = feat_sec.get("melspec_device") or raw_dict.get("melspec_device")
@@ -747,6 +786,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         default_device=str(default_device),
         default_cutoff=default_cutoff,
         default_refractory=default_refractory,
+        default_trigger_level=default_trigger_level,
         melspec_model_path=str(melspec_model) if melspec_model else None,
         melspec_device=str(melspec_device) if melspec_device else None,
         embedding_model_path=str(embedding_model) if embedding_model else None,
@@ -765,6 +805,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
 
         cutoff_raw = item.get("cutoff")
         refractory_raw = item.get("refractory")
+        trigger_level_raw = item.get("trigger_level")
 
         model_entry = SingleModelConfig(
             name=str(m_name),
@@ -772,6 +813,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
             phrase=item.get("phrase", str(m_name).replace("_", " ").title()),
             cutoff=_safe_float(cutoff_raw, cfg.default_cutoff) if cutoff_raw is not None else None,
             refractory=_safe_float(refractory_raw, cfg.default_refractory) if refractory_raw is not None else None,
+            trigger_level=_safe_int(trigger_level_raw, cfg.default_trigger_level) if trigger_level_raw is not None else None,
             device=item.get("device"),
             languages=item.get("languages", ["en"]),
         )
@@ -815,6 +857,12 @@ def main(
         None,
         "--cutoff",
         help=t("cli.options.cutoff"),
+    ),
+    trigger_level: Optional[int] = typer.Option(
+        None,
+        "--trigger-level",
+        "--trigger_level",
+        help=t("cli.options.trigger_level"),
     ),
     refractory: Optional[float] = typer.Option(
         None,
@@ -872,6 +920,8 @@ def main(
         server_config.default_device = device
     if cutoff is not None:
         server_config.default_cutoff = cutoff
+    if trigger_level is not None:
+        server_config.default_trigger_level = max(1, trigger_level)
     if refractory is not None:
         server_config.default_refractory = refractory
     if melspec_model is not None:
@@ -892,6 +942,7 @@ def main(
                 phrase=clean_name.replace("_", " ").title(),
                 cutoff=cutoff,
                 refractory=refractory,
+                trigger_level=trigger_level,
                 device=device,
             )
             existing_idx = next(
@@ -919,6 +970,7 @@ def main(
                             phrase=clean_name.replace("_", " ").title(),
                             cutoff=cutoff,
                             refractory=refractory,
+                            trigger_level=trigger_level,
                             device=device,
                         )
                     )
