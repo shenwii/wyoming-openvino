@@ -106,9 +106,25 @@ pip install -r requirements.txt
 # Option B: Fast launch on Intel NPU
 ./wyoming-wakeword.sh --model models/hey_jarvis_v0.1.onnx --device NPU --cutoff 0.6 --port 10400
 
-# Option C: Scan directory for models
+# Option C: Scan directory for models (supports .onnx and .tflite)
 ./wyoming-wakeword.sh --model-dir ./models --device NPU --port 10400
 ```
+
+### 4. Custom Wake Word Model Training (Dual Format: ONNX & TFLite)
+
+The repository includes a dedicated training pipeline in [`wakeword_trainer/`](wakeword_trainer/README.md). It generates synthetic speech with Kokoro & Edge-TTS, simulates acoustic environments (MIT RIRs + ESC-50 noise), and exports both **Intel NPU-optimized static ONNX** and **microWakeWord / ESPHome compatible TFLite** models:
+
+```bash
+cd wakeword_trainer
+pip install -r requirements.txt
+
+# Run complete automated end-to-end training
+python run_pipeline.py --config config.sample.yaml
+
+# Fast re-export from existing weights (seconds, supports Float32 and INT8 quantization)
+python train.py --export-only --quantize
+```
+> For complete instructions on training configuration, INT8 quantization, and deployment to ESPHome / Home Assistant, see the [Wakeword Trainer Documentation](wakeword_trainer/README.md).
 
 ---
 

@@ -110,6 +110,8 @@ class SingleModelConfig:
     refractory: Optional[float] = None
     trigger_level: Optional[int] = None
     sliding_window_size: Optional[int] = None
+    trailing_fall: Optional[bool] = None
+    max_trailing_frames: Optional[int] = None
     device: Optional[str] = None
     languages: List[str] = field(default_factory=lambda: ["en"])
 
@@ -125,6 +127,8 @@ class WakewordServerConfig:
     default_refractory: float = 2.0
     default_trigger_level: int = 1
     default_sliding_window_size: int = 1
+    default_trailing_fall: bool = True
+    default_max_trailing_frames: int = 8
     melspec_model_path: Optional[str] = None
     melspec_device: Optional[str] = None
     embedding_model_path: Optional[str] = None
@@ -286,6 +290,9 @@ class LoadedClassifier:
         effective_refractory: float = 2.0,
         trigger_level: int = 1,
         sliding_window_size: int = 1,
+        trailing_fall: bool = True,
+        max_trailing_frames: int = 8,
+        trailing_drop_ratio: float = 0.25,
     ) -> None:
         self.config = config
         self.compiled_model = compiled_model
@@ -296,6 +303,9 @@ class LoadedClassifier:
         self._effective_refractory = effective_refractory
         self._trigger_level = max(1, int(trigger_level))
         self._sliding_window_size = max(1, int(sliding_window_size))
+        self._trailing_fall = bool(trailing_fall)
+        self._max_trailing_frames = max(1, int(max_trailing_frames))
+        self._trailing_drop_ratio = max(0.0, min(1.0, float(trailing_drop_ratio)))
         self.last_triggered_time: float = 0.0
 
     @property
@@ -329,6 +339,30 @@ class LoadedClassifier:
     @sliding_window_size.setter
     def sliding_window_size(self, value: int) -> None:
         self._sliding_window_size = max(1, int(value))
+
+    @property
+    def trailing_fall(self) -> bool:
+        return self._trailing_fall
+
+    @trailing_fall.setter
+    def trailing_fall(self, value: bool) -> None:
+        self._trailing_fall = bool(value)
+
+    @property
+    def max_trailing_frames(self) -> int:
+        return self._max_trailing_frames
+
+    @max_trailing_frames.setter
+    def max_trailing_frames(self, value: int) -> None:
+        self._max_trailing_frames = max(1, int(value))
+
+    @property
+    def trailing_drop_ratio(self) -> float:
+        return self._trailing_drop_ratio
+
+    @trailing_drop_ratio.setter
+    def trailing_drop_ratio(self, value: float) -> None:
+        self._trailing_drop_ratio = max(0.0, min(1.0, float(value)))
 
     @property
     def refractory(self) -> float:
@@ -480,6 +514,8 @@ class WakeWordEngine:
         refractory = m_cfg.refractory if m_cfg.refractory is not None else self.config.default_refractory
         trigger_level = m_cfg.trigger_level if m_cfg.trigger_level is not None else self.config.default_trigger_level
         sliding_window_size = m_cfg.sliding_window_size if m_cfg.sliding_window_size is not None else self.config.default_sliding_window_size
+        trailing_fall = m_cfg.trailing_fall if m_cfg.trailing_fall is not None else self.config.default_trailing_fall
+        max_trailing_frames = m_cfg.max_trailing_frames if m_cfg.max_trailing_frames is not None else self.config.default_max_trailing_frames
 
         path = Path(m_cfg.model_path).expanduser().resolve()
         if not path.exists():
@@ -540,6 +576,8 @@ class WakeWordEngine:
             effective_refractory=refractory,
             trigger_level=trigger_level,
             sliding_window_size=sliding_window_size,
+            trailing_fall=trailing_fall,
+            max_trailing_frames=max_trailing_frames,
         )
         self.classifiers[m_cfg.name] = classifier
         logger.info(
@@ -550,6 +588,7 @@ class WakeWordEngine:
                 cutoff=classifier.cutoff,
                 trigger_level=classifier.trigger_level,
                 sliding_window_size=classifier.sliding_window_size,
+                trailing_fall=classifier.trailing_fall,
                 refractory=classifier.refractory,
                 device=classifier.actual_device,
             )
@@ -579,6 +618,7 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
         self.embedding_buffer = np.zeros((DEFAULT_CONTEXT_LEN, EMBEDDING_DIM), dtype=np.float32)
         self.model_hits: Dict[str, int] = defaultdict(int)
         self.score_windows: Dict[str, deque] = {}
+        self.pending_detections: Dict[str, Dict[str, Any]] = {}
         self.has_detected = False
 
     async def handle_event(self, event: Event) -> bool:
@@ -625,7 +665,9 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
 
                 detected_model = None
                 try:
-                    detected_model = await self._process_frame(audio_samples)
+                    detected_model = await self._process_frame(
+                        audio_samples, chunk_timestamp=chunk.timestamp
+                    )
                 except Exception as exc:
                     logger.error(t("log.inference_error", error=str(exc)), exc_info=True)
                 if detected_model:
@@ -649,7 +691,27 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
             return True
 
         if AudioStop.is_type(event.type):
-            if not self.has_detected:
+            if self.pending_detections and not self.has_detected:
+                for model_name, pending in list(self.pending_detections.items()):
+                    model = pending["model"]
+                    self.has_detected = True
+                    logger.info(
+                        t(
+                            "log.wake_detected",
+                            name=model.name,
+                            phrase=model.phrase,
+                            timestamp=pending.get("timestamp"),
+                        )
+                    )
+                    await self.write_event(
+                        Detection(
+                            name=model.name,
+                            timestamp=pending.get("timestamp"),
+                        ).event()
+                    )
+                    self._on_detected_cooldown()
+                    break
+            elif not self.has_detected:
                 logger.debug(t("log.not_detected"))
                 await self.write_event(NotDetected().event())
             self._reset_session()
@@ -665,13 +727,19 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
         self.model_hits.clear()
         for dq in self.score_windows.values():
             dq.clear()
+        self.pending_detections.clear()
         self.has_detected = False
 
     def _on_detected_cooldown(self) -> None:
-        """Clear embedding buffer after positive detection to prevent immediate duplicate triggers."""
+        """Clear embedding buffer and pending detections after positive trigger."""
         self.embedding_buffer.fill(0)
+        self.pending_detections.clear()
 
-    async def _process_frame(self, audio_samples: np.ndarray) -> Optional[LoadedClassifier]:
+    async def _process_frame(
+        self,
+        audio_samples: np.ndarray,
+        chunk_timestamp: Optional[int] = None,
+    ) -> Optional[LoadedClassifier]:
         """Process a single frame and evaluate across active classifiers."""
         pipeline = self.engine.feature_pipeline
         now = time.time()
@@ -718,16 +786,97 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                 self.model_hits[model.name] = 0
 
             hits = self.model_hits[model.name]
-            if score > 0.05 or eval_score > 0.05 or hits > 0:
+            is_pending = model.name in self.pending_detections
+
+            if score > 0.05 or eval_score > 0.05 or hits > 0 or is_pending:
                 logger.debug(
-                    "Model [%s] score: %.4f (win_avg: %.4f, cutoff: %.2f, hits: %d/%d, win: %d/%d)",
-                    model.name, score, eval_score, model.cutoff, hits, model.trigger_level, len(dq), model.sliding_window_size
+                    "Model [%s] score: %.4f (win_avg: %.4f, cutoff: %.2f, hits: %d/%d, win: %d/%d%s)",
+                    model.name,
+                    score,
+                    eval_score,
+                    model.cutoff,
+                    hits,
+                    model.trigger_level,
+                    len(dq),
+                    model.sliding_window_size,
+                    " [PENDING]" if is_pending else "",
                 )
 
-            if model.check_trigger(eval_score, now, current_hits=hits):
-                self.model_hits[model.name] = 0
-                dq.clear()
-                return model
+            # Case A: Model already in pending state, waiting for trailing fall-off
+            if is_pending:
+                pending = self.pending_detections[model.name]
+                pending["pending_frames"] += 1
+                if eval_score > pending["peak_score"]:
+                    pending["peak_score"] = eval_score
+                peak = pending["peak_score"]
+                p_frames = pending["pending_frames"]
+
+                should_release = False
+                release_reason = ""
+                # 1. Dropped below cutoff (end of wake word, entering silence / inter-phrase pause)
+                if eval_score < model.cutoff:
+                    should_release = True
+                    release_reason = f"fell below cutoff ({eval_score:.4f} < {model.cutoff:.2f})"
+                # 2. Significant drop from peak (e.g. dropped by 25% from peak and delta >= 0.10)
+                elif (
+                    peak >= model.cutoff
+                    and eval_score <= peak * (1.0 - model.trailing_drop_ratio)
+                    and (peak - eval_score) >= 0.10
+                ):
+                    should_release = True
+                    release_reason = f"dropped from peak ({eval_score:.4f} vs peak {peak:.4f})"
+                # 3. Maximum wait frames reached (safety guard against hanging on prolonged high sound)
+                elif p_frames >= model.max_trailing_frames:
+                    should_release = True
+                    release_reason = f"max frames reached ({p_frames} >= {model.max_trailing_frames})"
+
+                if should_release:
+                    logger.info(
+                        "Model [%s] trailing-fall confirmed: %s (peak=%.4f, final=%.4f, wait_frames=%d)",
+                        model.name,
+                        release_reason,
+                        peak,
+                        eval_score,
+                        p_frames,
+                    )
+                    del self.pending_detections[model.name]
+                    model.last_triggered_time = now
+                    self.model_hits[model.name] = 0
+                    dq.clear()
+                    return model
+
+            # Case B: Model not in pending, check if it hits activation threshold
+            elif eval_score >= model.cutoff and hits >= model.trigger_level:
+                if now - model.last_triggered_time >= model.refractory:
+                    if model.trailing_fall and model.max_trailing_frames > 0:
+                        # Enter pending mode: wait for tail fall-off
+                        self.pending_detections[model.name] = {
+                            "model": model,
+                            "peak_score": eval_score,
+                            "pending_frames": 0,
+                            "start_time": now,
+                            "timestamp": chunk_timestamp,
+                        }
+                        logger.debug(
+                            "Model [%s] reached trigger condition (score=%.4f), entering trailing-fall wait...",
+                            model.name,
+                            eval_score,
+                        )
+                    else:
+                        # Immediate trigger (legacy mode)
+                        model.last_triggered_time = now
+                        self.model_hits[model.name] = 0
+                        dq.clear()
+                        return model
+                else:
+                    logger.debug(
+                        t(
+                            "log.in_refractory",
+                            name=model.name,
+                            score=eval_score,
+                            remaining=model.refractory - (now - model.last_triggered_time),
+                        )
+                    )
 
         return None
 
@@ -751,6 +900,15 @@ def _safe_int(val, default: int) -> int:
         return int(val)
     except (ValueError, TypeError):
         return default
+
+
+def _safe_bool(val, default: bool) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    return s in ("1", "true", "yes", "on")
 
 
 def load_config_file(config_path: Path) -> WakewordServerConfig:
@@ -810,6 +968,18 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         or raw_dict.get("window_size"),
         1,
     )
+    default_trailing_fall = _safe_bool(
+        raw_dict.get("default_trailing_fall")
+        if raw_dict.get("default_trailing_fall") is not None
+        else raw_dict.get("trailing_fall"),
+        True,
+    )
+    default_max_trailing_frames = _safe_int(
+        raw_dict.get("default_max_trailing_frames")
+        or raw_dict.get("max_trailing_frames")
+        or raw_dict.get("trailing_frames"),
+        8,
+    )
 
     melspec_model = feat_sec.get("melspec_model") or raw_dict.get("melspec_model")
     melspec_device = feat_sec.get("melspec_device") or raw_dict.get("melspec_device")
@@ -825,6 +995,8 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         default_refractory=default_refractory,
         default_trigger_level=default_trigger_level,
         default_sliding_window_size=default_sliding_window_size,
+        default_trailing_fall=default_trailing_fall,
+        default_max_trailing_frames=default_max_trailing_frames,
         melspec_model_path=str(melspec_model) if melspec_model else None,
         melspec_device=str(melspec_device) if melspec_device else None,
         embedding_model_path=str(embedding_model) if embedding_model else None,
@@ -845,6 +1017,8 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         refractory_raw = item.get("refractory")
         trigger_level_raw = item.get("trigger_level")
         sliding_window_size_raw = item.get("sliding_window_size") or item.get("window_size")
+        trailing_fall_raw = item.get("trailing_fall")
+        max_trailing_frames_raw = item.get("max_trailing_frames") or item.get("trailing_frames")
 
         model_entry = SingleModelConfig(
             name=str(m_name),
@@ -854,6 +1028,8 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
             refractory=_safe_float(refractory_raw, cfg.default_refractory) if refractory_raw is not None else None,
             trigger_level=_safe_int(trigger_level_raw, cfg.default_trigger_level) if trigger_level_raw is not None else None,
             sliding_window_size=_safe_int(sliding_window_size_raw, cfg.default_sliding_window_size) if sliding_window_size_raw is not None else None,
+            trailing_fall=_safe_bool(trailing_fall_raw, cfg.default_trailing_fall) if trailing_fall_raw is not None else None,
+            max_trailing_frames=_safe_int(max_trailing_frames_raw, cfg.default_max_trailing_frames) if max_trailing_frames_raw is not None else None,
             device=item.get("device"),
             languages=item.get("languages", ["en"]),
         )
@@ -910,6 +1086,17 @@ def main(
         "--sliding_window_size",
         "--window-size",
         help=t("cli.options.sliding_window_size"),
+    ),
+    trailing_fall: Optional[bool] = typer.Option(
+        None,
+        "--trailing-fall/--no-trailing-fall",
+        help=t("cli.options.trailing_fall"),
+    ),
+    max_trailing_frames: Optional[int] = typer.Option(
+        None,
+        "--max-trailing-frames",
+        "--trailing-frames",
+        help=t("cli.options.max_trailing_frames"),
     ),
     refractory: Optional[float] = typer.Option(
         None,
@@ -971,6 +1158,10 @@ def main(
         server_config.default_trigger_level = max(1, trigger_level)
     if sliding_window_size is not None:
         server_config.default_sliding_window_size = max(1, sliding_window_size)
+    if trailing_fall is not None:
+        server_config.default_trailing_fall = trailing_fall
+    if max_trailing_frames is not None:
+        server_config.default_max_trailing_frames = max(1, max_trailing_frames)
     if refractory is not None:
         server_config.default_refractory = refractory
     if melspec_model is not None:
@@ -993,6 +1184,8 @@ def main(
                 refractory=refractory,
                 trigger_level=trigger_level,
                 sliding_window_size=sliding_window_size,
+                trailing_fall=trailing_fall,
+                max_trailing_frames=max_trailing_frames,
                 device=device,
             )
             existing_idx = next(
@@ -1022,6 +1215,8 @@ def main(
                             refractory=refractory,
                             trigger_level=trigger_level,
                             sliding_window_size=sliding_window_size,
+                            trailing_fall=trailing_fall,
+                            max_trailing_frames=max_trailing_frames,
                             device=device,
                         )
                     )

@@ -106,9 +106,25 @@ pip install -r requirements.txt
 # 方式 B: 极速单模型在 Intel NPU 上运行
 ./wyoming-wakeword.sh --model models/hey_jarvis_v0.1.onnx --device NPU --cutoff 0.6 --port 10400
 
-# 方式 C: 自动扫描目录下所有模型
+# 方式 C: 自动扫描目录下所有模型 (支持 .onnx 与 .tflite)
 ./wyoming-wakeword.sh --model-dir ./models --device NPU --port 10400
 ```
+
+### 4. 自定义唤醒词全流程训练 (ONNX & TFLite 双格式支持)
+
+项目内置独立的唤醒词训练流水线套件 [`wakeword_trainer/`](wakeword_trainer/README_zh.md)，支持通过双引擎 TTS（Kokoro + Edge-TTS）自动合成正负样本、模拟真实房间混响与背景噪声，并一键导出 **Intel NPU 优化 ONNX** 与 **microWakeWord / ESPHome 兼容 TFLite** 模型：
+
+```bash
+cd wakeword_trainer
+pip install -r requirements.txt
+
+# 一键运行全自动端到端训练
+python run_pipeline.py --config config.sample_zh.yaml
+
+# 仅从已有权重快速重导出 (秒级完成，支持 Float32 和 INT8 量化)
+python train.py --export-only --quantize
+```
+> 详细训练定制与多平台（Home Assistant、ESPHome、ESP32-S3）部署指南请参阅 [唤醒词训练套件详细文档](wakeword_trainer/README_zh.md)。
 
 ---
 

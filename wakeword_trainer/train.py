@@ -787,13 +787,21 @@ def export_tflite_model(
 
         layer_size = model.fc1.out_features
 
-        keras_model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(context_length, embedding_dim), batch_size=1, name="input"),
-            tf.keras.layers.Flatten(name="flatten"),
-            tf.keras.layers.Dense(layer_size, activation="relu", name="fc1"),
-            tf.keras.layers.Dense(layer_size, activation="relu", name="fc2"),
-            tf.keras.layers.Dense(1, activation="sigmoid", name="out_fc"),
-        ])
+        try:
+            inp = tf.keras.Input(shape=(context_length, embedding_dim), batch_size=1, name="input")
+            h = tf.keras.layers.Flatten(name="flatten")(inp)
+            h = tf.keras.layers.Dense(layer_size, activation="relu", name="fc1")(h)
+            h = tf.keras.layers.Dense(layer_size, activation="relu", name="fc2")(h)
+            out = tf.keras.layers.Dense(1, activation="sigmoid", name="out_fc")(h)
+            keras_model = tf.keras.Model(inputs=inp, outputs=out)
+        except Exception:
+            keras_model = tf.keras.Sequential([
+                tf.keras.layers.InputLayer(input_shape=(context_length, embedding_dim), batch_size=1, name="input"),
+                tf.keras.layers.Flatten(name="flatten"),
+                tf.keras.layers.Dense(layer_size, activation="relu", name="fc1"),
+                tf.keras.layers.Dense(layer_size, activation="relu", name="fc2"),
+                tf.keras.layers.Dense(1, activation="sigmoid", name="out_fc"),
+            ])
 
         fc1_w = model.fc1.weight.detach().cpu().numpy().T
         fc1_b = model.fc1.bias.detach().cpu().numpy()
@@ -906,14 +914,24 @@ def save_model_artifacts(
 
     # 3. Export microWakeWord / ESPHome compatible TFLite model
     tflite_ok = False
+    tflite_int8_ok = False
+    final_tflite_int8_path = output_dir / f"{model_name}_int8.tflite"
     if export_tflite:
         tflite_ok = export_tflite_model(
             model=model,
             output_tflite_path=final_tflite_path,
             context_length=context_length,
             embedding_dim=embedding_dim,
-            quantize=quantize,
+            quantize=False,
         )
+        if quantize:
+            tflite_int8_ok = export_tflite_model(
+                model=model,
+                output_tflite_path=final_tflite_int8_path,
+                context_length=context_length,
+                embedding_dim=embedding_dim,
+                quantize=True,
+            )
 
     # 4. Write model metadata JSON
     phrase = cfg.get("wakeword", {}).get("phrase")
@@ -923,6 +941,7 @@ def save_model_artifacts(
         "model_type": "openWakeWord_DNN_NPU",
         "onnx_file": f"{model_name}.onnx" if onnx_ok else None,
         "tflite_file": f"{model_name}.tflite" if tflite_ok else None,
+        "tflite_int8_file": f"{model_name}_int8.tflite" if tflite_int8_ok else None,
         "weights_file": f"{model_name}.pt",
         "phrase": phrase,
         "language": lang,
@@ -942,7 +961,9 @@ def save_model_artifacts(
     if onnx_ok:
         print(f"   - ONNX (Intel NPU / OpenVINO): {final_onnx_path}")
     if tflite_ok:
-        print(f"   - TFLite (microWakeWord / ESPHome): {final_tflite_path}")
+        print(f"   - TFLite Float32 (openWakeWord / HA): {final_tflite_path}")
+    if tflite_int8_ok:
+        print(f"   - TFLite INT8 (microWakeWord / ESPHome): {final_tflite_int8_path}")
     print(f"   - PyTorch Weights: {pt_path}")
     print(f"   - Metadata: {info_path}")
     if onnx_ok:

@@ -89,13 +89,52 @@ python run_pipeline.py --quick-mode
 
 ---
 
-## 🎯 Wyoming サービスとの連携
+## 📦 TFLite モデルのエクスポート (microWakeWord / ESPHome)
+
+本ツールは **TensorFlow Lite (`.tflite`)** 形式のエクスポートにも対応しており、**Home Assistant openWakeWord**、**ESPHome**、**microWakeWord** などの組み込み端末でそのまま利用可能です。
+
+```bash
+# 全フォーマット (ONNX + TFLite Float32) をエクスポート (再学習不要)
+python train.py --config config.yaml --export-only
+
+# TFLite のみエクスポート (Float32, 約 390 KB)
+python train.py --config config.yaml --export-tflite
+
+# INT8 動的範囲量子化版 TFLite をエクスポート (約 100 KB、ESP32-S3 / マイコン向け)
+python train.py --config config.yaml --export-tflite --quantize
+```
+
+---
+
+## 🎯 モデルのデプロイ
+
+### 1. Wyoming Wake Word サービス (Intel NPU / GPU / CPU)
+
+OpenVINO ランタイムを通じて、**`.onnx` と `.tflite` の両方をネイティブ実行可能**です：
 
 ```bash
 cd ../wyoming-wakeword
+# ONNX モデルの実行 (Intel NPU 推奨)
 python wyoming-wakeword.py \
     --model ../wakeword_trainer/output/hey_jarvis_v1.onnx \
     --device NPU \
     --cutoff 0.55 \
     --refractory 2.0
+
+# TFLite モデルの実行 (OpenVINO ネイティブ加速)
+python wyoming-wakeword.py \
+    --model ../wakeword_trainer/output/hey_jarvis_v1.tflite \
+    --device NPU \
+    --cutoff 0.55
+```
+
+### 2. ESPHome / microWakeWord (ESP32-S3)
+
+出力された量子化モデル `{friend_name}_int8.tflite` を ESPHome に設定：
+```yaml
+micro_wake_word:
+  models:
+    - model: "hey_jarvis_v1_int8.tflite"
+      probability_cutoff: 0.55
+      sliding_window_average_size: 2
 ```

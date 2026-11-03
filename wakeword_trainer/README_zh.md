@@ -131,27 +131,113 @@ python run_pipeline.py --quick-mode
    ```bash
    python augment_data.py --config config.yaml
    ```
-5. **训练神经网络并导出 NPU 优化 ONNX 模型**:
+5. **训练神经网络并导出全格式模型 (ONNX + TFLite)**:
    ```bash
    python train.py --config config.yaml --steps 20000 --batch-size 128
    ```
-
-6. **仅从已有权重导出 ONNX 模型 (无需重新训练)**:
-   ```bash
-   python train.py --config config.yaml --export-only
-   ```
-
-最终模型将输出至 `output/{friend_name}.onnx`，PyTorch 权重保存至 `output/{friend_name}.pt`，并附带 `{friend_name}.json` 元信息文件。
+   > 训练完成后将自动在 `output/` 目录生成全套产物：
+   > - `output/{friend_name}.onnx`: Intel NPU / OpenVINO 纯静态图加速模型
+   > - `output/{friend_name}.tflite`: 标准 32 位浮点 TensorFlow Lite 模型
+   > - `output/{friend_name}.pt`: PyTorch 原始权重（供后续重导出使用）
+   > - `output/{friend_name}.json`: 唤醒词元数据与推荐阈值配置
 
 ---
 
-## 🎯 部署到 Wyoming 唤醒词服务
+## 📦 TFLite 模型生成与导出说明 (microWakeWord / ESPHome)
+
+训练器原生支持导出 **TensorFlow Lite (`.tflite`)** 格式，全面兼容 **Home Assistant openWakeWord**、**ESPHome** 以及 **microWakeWord** 嵌入式终端。
+
+### 1. 导出依赖准备
+
+导出 `.tflite` 格式需依赖 TensorFlow（已包含在 `requirements.txt` 中）：
+```bash
+pip install tensorflow>=2.13.0
+```
+*(若未安装 TensorFlow，脚本将优雅跳过 TFLite 导出并仅保留 ONNX 模型。安装依赖后可随时单独重导出，无需重新训练！)*
+
+### 2. 单独导出与格式转换命令 (无需重新训练，秒级完成)
+
+利用保存的 PyTorch 权重文件（`output/{friend_name}.pt`），可以通过命令行随时单步导出指定格式：
+
+```bash
+# 选项 A: 一键导出所有格式 (ONNX + TFLite Float32)
+python train.py --config config.yaml --export-only
+
+# 选项 B: 仅导出 TFLite 模型 (Float32 标准版，约 390 KB)
+python train.py --config config.yaml --export-tflite
+
+# 选项 C: 导出带 INT8 动态范围量化的 TFLite 模型 (约 100 KB，大幅减小体积，适配 ESP32 / 嵌入式设备)
+python train.py --config config.yaml --export-tflite --quantize
+# 生成产物: output/{friend_name}.tflite (Float32) 与 output/{friend_name}_int8.tflite (INT8)
+
+# 选项 D: 从指定的 checkpoint 权重文件导出
+python train.py --config config.yaml --export-only --checkpoint output/xiongmaojingling.pt
+```
+
+### 3. TFLite 与 ONNX 模型格式对比与选型
+
+| 模型格式 | 典型体积 | 推荐部署场景与硬件 | 对应应用环境 |
+| :--- | :---: | :--- | :--- |
+| **`.onnx`** | ~400 KB | **Intel NPU** (Core Ultra Meteor/Lunar/Arrow Lake)、Intel iGPU/Arc 独显、x86/x64 服务器 | `wyoming-wakeword`、OpenVINO 运行时、ONNXRuntime |
+| **`.tflite` (Float32)** | ~390 KB | 树莓派、Linux/Windows 边缘盒子、Home Assistant 主机 | Home Assistant `openWakeWord` 插件、`wyoming-wakeword` (OpenVINO 原生支持直接加载) |
+| **`_int8.tflite` (INT8)** | **~100 KB** | **ESP32-S3** 等嵌入式微控制器、高内存受限 IoT 终端 | **ESPHome**、**microWakeWord** 嵌入式端组件 |
+
+---
+
+## 🎯 模型多平台部署指南
+
+### 1. 部署到 Wyoming 唤醒词服务 (Intel NPU / GPU / CPU)
+
+`wyoming-wakeword` 基于 OpenVINO 运行时构建，**原生同时支持直接加载 `.onnx` 与 `.tflite` 模型**：
 
 ```bash
 cd ../wyoming-wakeword
+
+# 运行 ONNX 模型 (优先调用 Intel NPU)
 python wyoming-wakeword.py \
     --model ../wakeword_trainer/output/nihaoxiaozhi_v1.onnx \
     --device NPU \
     --cutoff 0.55 \
     --refractory 2.0
+
+# 运行 TFLite 模型 (OpenVINO 原生加速)
+python wyoming-wakeword.py \
+    --model ../wakeword_trainer/output/nihaoxiaozhi_v1.tflite \
+    --device NPU \
+    --cutoff 0.55
+```
+
+### 2. 部署到 Home Assistant openWakeWord 官方插件
+
+将生成的 `{friend_name}.tflite`（或 `{friend_name}.onnx`）文件复制到 Home Assistant 的 openWakeWord 自定义模型目录中：
+```bash
+# 复制到 Home Assistant 配置目录 (通常为 /share/openwakeword)
+cp output/nihaoxiaozhi_v1.tflite /share/openwakeword/
+```
+在 Home Assistant 页面中刷新 openWakeWord，在语音助手唤醒词下拉菜单中选择新增的 `nihaoxiaozhi_v1` 即可。
+
+### 3. 部署到 ESPHome / microWakeWord (ESP32-S3 硬件拾音终端)
+
+将生成的量化版 `{friend_name}_int8.tflite` 上传至 ESPHome 工程：
+```yaml
+# ESPHome 配置示例
+micro_wake_word:
+  models:
+    - model: "nihaoxiaozhi_v1_int8.tflite"
+      probability_cutoff: 0.55
+      sliding_window_average_size: 2
+```
+
+---
+
+## 🔍 数据与环境诊断工具
+
+若在训练前需要确认负样本（ACAV100M、近音词）、环境噪声（ESC-50）以及房间混响（MIT RIR）是否正常就绪：
+
+```bash
+# 1. 秒级诊断检查所有 8 项训练资源 (不启动训练)
+python train.py --check-data
+
+# 2. 强制重新抽取特征 (清除失效或空白的旧缓存)
+python train.py --recompute-features
 ```

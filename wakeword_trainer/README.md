@@ -134,27 +134,110 @@ python run_pipeline.py --quick-mode
    ```bash
    python augment_data.py --config config.yaml
    ```
-5. **Train DNN and export NPU-optimized ONNX**:
+5. **Train DNN and export models (ONNX + TFLite)**:
    ```bash
    python train.py --config config.yaml --steps 20000 --batch-size 128
    ```
-6. **Export-only from trained weights (no re-training needed)**:
-   ```bash
-   python train.py --config config.yaml --export-only
-   ```
-
-Outputs are saved in `output/{friend_name}.onnx`, `output/{friend_name}.pt`, and `output/{friend_name}.json`.
+   > Training outputs full artifacts in `output/`:
+   > - `output/{friend_name}.onnx`: Intel NPU / OpenVINO static acceleration model
+   > - `output/{friend_name}.tflite`: Standard float32 TensorFlow Lite model
+   > - `output/{friend_name}.pt`: PyTorch weights checkpoint (for fast re-export)
+   > - `output/{friend_name}.json`: Model metadata & recommended cutoff thresholds
 
 ---
 
-## 🎯 Integration with Wyoming Wake Word
+## 📦 TFLite Model Export & Deployment (microWakeWord / ESPHome)
 
-Run directly with `wyoming-wakeword`:
+The training suite natively supports exporting **TensorFlow Lite (`.tflite`)** models, fully compatible with **Home Assistant openWakeWord**, **ESPHome**, and **microWakeWord** edge devices.
+
+### 1. Requirements
+
+Exporting `.tflite` requires TensorFlow (included in `requirements.txt`):
+```bash
+pip install tensorflow>=2.13.0
+```
+*(If TensorFlow is not installed, the trainer gracefully skips TFLite export and saves ONNX. You can export TFLite later in seconds using `--export-tflite` without re-training!)*
+
+### 2. Standalone Export & Quantization Commands (Instant, No Re-training)
+
+Using saved PyTorch weights (`output/{friend_name}.pt`), export desired formats anytime:
+
+```bash
+# Option A: Export all formats (ONNX + TFLite Float32)
+python train.py --config config.yaml --export-only
+
+# Option B: Export only TFLite model (Float32, ~390 KB)
+python train.py --config config.yaml --export-tflite
+
+# Option C: Export with INT8 dynamic range quantization (~100 KB, perfect for ESP32 / microcontrollers)
+python train.py --config config.yaml --export-tflite --quantize
+# Outputs: output/{friend_name}.tflite (Float32) and output/{friend_name}_int8.tflite (INT8)
+
+# Option D: Export from custom checkpoint weights
+python train.py --config config.yaml --export-only --checkpoint output/my_model.pt
+```
+
+### 3. Model Format Comparison & Selection
+
+| Format | Typical Size | Recommended Hardware & Target | Runtime Environment |
+| :--- | :---: | :--- | :--- |
+| **`.onnx`** | ~400 KB | **Intel NPU** (Core Ultra Meteor/Lunar/Arrow Lake), Intel iGPU/Arc GPU, x86/x64 Servers | `wyoming-wakeword`, OpenVINO Runtime, ONNXRuntime |
+| **`.tflite` (Float32)** | ~390 KB | Raspberry Pi, Linux/Windows Edge boxes, Home Assistant Host | Home Assistant `openWakeWord` addon, `wyoming-wakeword` (natively supported by OpenVINO) |
+| **`_int8.tflite` (INT8)** | **~100 KB** | **ESP32-S3** microcontrollers, memory-constrained IoT nodes | **ESPHome**, **microWakeWord** firmware |
+
+---
+
+## 🎯 Multi-Platform Deployment Guide
+
+### 1. Wyoming Wake Word Service (Intel NPU / GPU / CPU)
+
+`wyoming-wakeword` is built on OpenVINO, which **natively supports directly loading both `.onnx` and `.tflite` models**:
+
 ```bash
 cd ../wyoming-wakeword
+
+# Run ONNX model (preferred on Intel NPU)
 python wyoming-wakeword.py \
     --model ../wakeword_trainer/output/hey_jarvis_v1.onnx \
     --device NPU \
     --cutoff 0.55 \
     --refractory 2.0
+
+# Run TFLite model (OpenVINO native acceleration)
+python wyoming-wakeword.py \
+    --model ../wakeword_trainer/output/hey_jarvis_v1.tflite \
+    --device NPU \
+    --cutoff 0.55
+```
+
+### 2. Home Assistant openWakeWord Addon
+
+Copy the generated `{friend_name}.tflite` (or `{friend_name}.onnx`) into Home Assistant's custom model directory:
+```bash
+cp output/hey_jarvis_v1.tflite /share/openwakeword/
+```
+Reload openWakeWord in Home Assistant, and select your custom wake word in the Voice Assistant settings.
+
+### 3. ESPHome / microWakeWord (ESP32-S3 Satellite)
+
+Upload `{friend_name}_int8.tflite` to your ESPHome configuration:
+```yaml
+# ESPHome YAML example
+micro_wake_word:
+  models:
+    - model: "hey_jarvis_v1_int8.tflite"
+      probability_cutoff: 0.55
+      sliding_window_average_size: 2
+```
+
+---
+
+## 🔍 Pre-flight Diagnostics & Cache Management
+
+```bash
+# 1. Audit all 8 dataset components in seconds before training
+python train.py --check-data
+
+# 2. Force re-extracting features (invalidating stale or empty cache)
+python train.py --recompute-features
 ```
