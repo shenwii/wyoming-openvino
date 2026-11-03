@@ -10,6 +10,8 @@ cli:
     voice: "グローバルデフォルト話者名 (例: zf_xiaobei, jf_alpha, af_heart、未指定時は自動選出)"
     speed: "話速倍率 (自然な聴感のため 0.85 推奨、>1.0 加速、<1.0 減速)"
     sample_rate: "音声サンプリングレート (Hz、Kokoro デフォルト 24000)"
+    cache_dir: "OpenVINO モデルコンパイルの永続キャッシュディレクトリ (デフォルトはモデル配下の .ov_cache)"
+    max_chunk_chars: "ストリーミング文分割の最大文字数 (デフォルト 65)"
 
 log:
   pipeline_frontend: "Kokoro ネイティブ KPipeline フロントエンドを使用 (lang_code={lang_code}, model=False)"
@@ -41,6 +43,10 @@ log:
   starting_service: "🚀 Wyoming Kokoro-OpenVINO 多言語 TTS サービスを起動しています..."
   default_voice: "🎙️ デフォルト話者: {voice} (音色ライブラリ合計: {count} 種)"
   ha_registered_langs: "🌐 Home Assistant に言語エコシステムを登録しました: {langs}"
+  cache_dir_info: "永続キャッシュディレクトリ: {path}"
+  gpu_warmup: "⚡ GPUデバイスを検出しました。マルチスケール動的シェイプ事前ウォームアップを実行中..."
+  gpu_warmup_done: "🎉 GPUマルチスケールカーネルの事前ウォームアップとキャッシュ構築が完了しました！"
+  hetero_gpu_tip: "💡 ヒント: GPUドライバがサポートされている場合は純粋な --device GPU を優先すると異種デバイス間のメモリコピーを削減できます。"
   warmup_start: "バックグラウンドでエンジンをウォームアップ中..."
   warmup_done: "🎉 エンジンのウォームアップ完了！最初のリクエストから秒未満で応答します。"
   warmup_skip: "ウォームアップをスキップまたは無視: {error}"

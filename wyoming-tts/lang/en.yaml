@@ -10,6 +10,8 @@ cli:
     voice: "Global default voice name (e.g. zf_xiaobei, jf_alpha, af_heart; auto-selected if not specified)"
     speed: "Speech speed multiplier (recommended 0.85 for natural cadence; >1.0 faster, <1.0 slower)"
     sample_rate: "Audio sample rate in Hz (Kokoro default 24000)"
+    cache_dir: "OpenVINO model compilation persistent cache directory (defaults to .ov_cache inside model dir)"
+    max_chunk_chars: "Streaming text clause maximum character length (default 65; zh 50-80, en 60-100)"
 
 log:
   pipeline_frontend: "Using Kokoro native KPipeline frontend (lang_code={lang_code}, model=False)"
@@ -41,6 +43,10 @@ log:
   starting_service: "Starting Wyoming Kokoro-OpenVINO Multilingual TTS Service..."
   default_voice: "🎙️ Default voice: {voice} (voice library total: {count} voices)"
   ha_registered_langs: "Registered language ecosystem with Home Assistant: {langs}"
+  cache_dir_info: "Model compilation cache directory: {path}"
+  gpu_warmup: "⚡ GPU device detected, executing multi-scale dynamic shape warm-up (compiling & caching GPU kernels)..."
+  gpu_warmup_done: "🎉 GPU multi-scale kernel warm-up and persistent cache build complete!"
+  hetero_gpu_tip: "💡 Tip: If GPU drivers and operators are fully supported, try pure --device GPU to avoid heterogeneous cross-device memory copying."
   warmup_start: "Running background engine warm-up..."
   warmup_done: "🎉 Engine warm-up complete! First request will achieve sub-second response."
   warmup_skip: "Warm-up skipped or ignored: {error}"

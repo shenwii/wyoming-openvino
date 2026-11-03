@@ -10,6 +10,8 @@ cli:
     voice: "全局默认发音人名称（如 zf_xiaobei, jf_alpha, af_heart，不填则自动推选）"
     speed: "语速倍率（推荐 0.85 获得更从容清丽自然的听感，>1.0 加速，<1.0 减速）"
     sample_rate: "音频采样率（Hz），Kokoro 默认 24000"
+    cache_dir: "OpenVINO 模型编译持久化缓存目录（默认存放在模型目录下的 .ov_cache 目录中）"
+    max_chunk_chars: "流式分句最大字符长度（默认 65，中文推荐 50-80，英文推荐 60-100）"
 
 log:
   pipeline_frontend: "使用 Kokoro 原生 KPipeline 前端 (lang_code={lang_code}, model=False)"
@@ -41,6 +43,10 @@ log:
   starting_service: "🚀 正在启动 Wyoming Kokoro-OpenVINO 多语言 TTS 服务..."
   default_voice: "🎙️ 默认发音人: {voice} (音色库总计: {count} 款声音)"
   ha_registered_langs: "🌐 已向 Home Assistant 注册语言体系: {langs}"
+  cache_dir_info: "持久化模型缓存: {path}"
+  gpu_warmup: "⚡ 检测到 GPU 设备，正在执行多尺度动态维度预热 (编译并缓存 GPU 内核)..."
+  gpu_warmup_done: "🎉 GPU 多尺度内核预热与持久化缓存构建完成！"
+  hetero_gpu_tip: "💡 提示：如果 GPU 驱动完整且算子兼容，推荐优先尝试纯 --device GPU，可避免异构跨设备拆分和内存拷贝损耗。"
   warmup_start: "正在执行后台引擎预热 (Warm-up)..."
   warmup_done: "🎉 引擎预热完成！首个请求将实现秒级出声。"
   warmup_skip: "预热跳过或忽略: {error}"

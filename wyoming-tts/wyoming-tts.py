@@ -137,7 +137,7 @@ def normalize_text_spacing(text: str) -> str:
     return text
 
 
-def split_text_into_streaming_chunks(text: str, max_chunk_chars: int = 35) -> List[str]:
+def split_text_into_streaming_chunks(text: str, max_chunk_chars: int = 65) -> List[str]:
     """
     Intelligently split long text into natural sentence streaming clauses.
     Principles:
@@ -684,16 +684,61 @@ class KokoroEngine:
         model_file: Path,
         device: str = "CPU",
         threads: Optional[int] = None,
+        cache_dir: Optional[Union[str, Path]] = None,
     ) -> None:
         self.model_file = model_file
         self.device = device.upper()
         self.threads = threads
 
+        if cache_dir:
+            self.cache_dir = Path(cache_dir)
+        else:
+            self.cache_dir = model_file.parent / ".ov_cache"
+
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(t("log.cache_dir_info", path=str(self.cache_dir)))
+        except Exception as e:
+            logger.warning(f"Could not create cache directory {self.cache_dir}: {e}")
+            self.cache_dir = None
+
         logger.info(t("log.loading_model", model=model_file.name, device=self.device))
         core = ov.Core()
+
+        if self.cache_dir:
+            try:
+                core.set_property({"CACHE_DIR": str(self.cache_dir)})
+            except Exception as e:
+                logger.debug(f"Failed to set CACHE_DIR on Core: {e}")
+
         model = core.read_model(str(model_file))
 
+        # GPU 动态维度优化：设置有界动态形状 (Bounded Dynamic Shape)
+        # 声明 token 长度范围在 1..512 之间，利于 GPU 驱动预分配显存池并抑制重分配卡顿
+        try:
+            inputs = model.inputs
+            if len(inputs) >= 1:
+                token_input = inputs[0]
+                pshape = token_input.partial_shape
+                if pshape.rank.is_static and pshape.rank.get_length() == 2:
+                    bounded_shape = ov.PartialShape([1, ov.Dimension(1, 512)])
+                    model.reshape({token_input.any_name: bounded_shape})
+                    logger.debug(f"Configured bounded dynamic shape for tokens: {bounded_shape}")
+        except Exception as e:
+            logger.debug(f"Bounded dynamic shape reshape skipped: {e}")
+
         ov_config: Dict[str, str] = {"PERFORMANCE_HINT": "LATENCY"}
+        if self.cache_dir:
+            ov_config["CACHE_DIR"] = str(self.cache_dir)
+
+        if "GPU" in self.device:
+            ov_config["INFERENCE_PRECISION_HINT"] = "f16"
+            try:
+                import os
+                ov_config["COMPILATION_NUM_THREADS"] = str(max(1, os.cpu_count() or 4))
+            except Exception:
+                pass
+
         if threads and threads > 0:
             ov_config["INFERENCE_NUM_THREADS"] = str(threads)
             logger.info(t("log.threads_set", threads=threads))
@@ -761,6 +806,7 @@ class TTSEventHandler(AsyncEventHandler):
         default_language: str,
         speed: float,
         sample_rate: int = 24000,
+        max_chunk_chars: int = 65,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -772,6 +818,7 @@ class TTSEventHandler(AsyncEventHandler):
         self.default_language = default_language
         self.speed = speed
         self.sample_rate = sample_rate
+        self.max_chunk_chars = max_chunk_chars
 
     async def handle_event(self, event: Event) -> bool:
         """Handle incoming Wyoming protocol event."""
@@ -858,7 +905,7 @@ class TTSEventHandler(AsyncEventHandler):
                 ).event()
             )
 
-            chunks = split_text_into_streaming_chunks(text)
+            chunks = split_text_into_streaming_chunks(text, max_chunk_chars=self.max_chunk_chars)
             logger.debug(t("log.chunks_split", count=len(chunks), chunks=chunks))
 
             loop = asyncio.get_running_loop()
@@ -960,6 +1007,17 @@ def main(
         "-t",
         help=t("cli.options.threads"),
     ),
+    cache_dir: Optional[str] = typer.Option(
+        None,
+        "--cache-dir",
+        help=t("cli.options.cache_dir"),
+    ),
+    max_chunk_chars: int = typer.Option(
+        65,
+        "--max-chunk-chars",
+        "-c",
+        help=t("cli.options.max_chunk_chars"),
+    ),
     language: str = typer.Option(
         "auto",
         "--language",
@@ -1008,6 +1066,7 @@ def main(
         model_file=model_file,
         device=device,
         threads=threads,
+        cache_dir=cache_dir,
     )
 
     g2p_manager = MultiLangG2P(
@@ -1057,6 +1116,18 @@ def main(
         warm_tokens = g2p_manager.text_to_tokens("Hello", language="en")
         warm_style = get_or_blend_voice(voices, selected_default_voice)
         engine.synthesize_tokens(warm_tokens, warm_style, speed=1.0)
+
+        # 针对 GPU/HETERO 执行多尺度动态序列预热，将多尺寸内核预先编译写入 CACHE_DIR 磁盘缓存中
+        if "GPU" in engine.device:
+            logger.info(t("log.gpu_warmup"))
+            warmup_lengths = [16, 32, 48, 64, 96, 128, 160, 200]
+            for wlen in warmup_lengths:
+                dummy_tok = np.ones((1, wlen), dtype=np.int64)
+                dummy_tok[0, 0] = 0
+                dummy_tok[0, -1] = 0
+                engine.synthesize_tokens(dummy_tok, warm_style, speed=1.0)
+            logger.info(t("log.gpu_warmup_done"))
+
         logger.info(t("log.warmup_done"))
     except Exception as e:
         logger.debug(t("log.warmup_skip", error=str(e)))
@@ -1066,6 +1137,10 @@ def main(
     logger.info(t("log.service_ready"))
     logger.info(t("log.listen_addr", host=host, port=port))
     logger.info(t("log.device_info", device=device))
+    if engine.cache_dir:
+        logger.info(t("log.cache_dir_info", path=str(engine.cache_dir)))
+    if "HETERO" in device.upper() and "GPU" in device.upper():
+        logger.info(t("log.hetero_gpu_tip"))
     logger.info(t("log.speed_info", speed=speed))
     logger.info(t("log.voice_info", voice=selected_default_voice))
     logger.info("=================================================================")
@@ -1083,6 +1158,7 @@ def main(
                     default_language=language,
                     speed=speed,
                     sample_rate=sample_rate,
+                    max_chunk_chars=max_chunk_chars,
                     **kw,
                 )
             )
