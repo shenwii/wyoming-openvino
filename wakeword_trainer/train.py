@@ -98,6 +98,13 @@ def resolve_torch_device(requested: str = "auto") -> torch.device:
         return torch.device(req)
 
 
+def find_wav_files(dir_path: Path) -> List[Path]:
+    """Find all WAV files in directory recursively (case-insensitive for Linux)."""
+    if not dir_path.exists():
+        return []
+    return sorted([p for p in dir_path.glob("**/*") if p.is_file() and p.suffix.lower() == ".wav"])
+
+
 # ==============================================================================
 # Feature Extraction Pipeline
 # ==============================================================================
@@ -166,16 +173,31 @@ class FeatureExtractor:
             pass
 
     def extract_features_from_audio(self, audio_16k: np.ndarray) -> np.ndarray:
-        """Extract 96-dimensional embedding sequence from a 16kHz audio array."""
-        num_chunks = len(audio_16k) // CHUNK_SAMPLES
-        if num_chunks == 0:
+        """
+        Extract 96-dimensional embedding sequence from a 16kHz audio array.
+        Pads audio with lead-in silence (19 chunks = 1.52s) so mel_history is primed
+        before the utterance begins, exactly mirroring real-time streaming microphone conditions.
+        """
+        if len(audio_16k) == 0:
             return np.empty((0, EMBEDDING_DIM), dtype=np.float32)
+
+        lead_chunks = MEL_HISTORY_FRAMES // 4  # 19 chunks = 24320 samples = 1.52s
+        lead_samples = lead_chunks * CHUNK_SAMPLES
+        tail_samples = 6 * CHUNK_SAMPLES      # 0.48s trailing silence
+
+        # Align audio length to multiple of CHUNK_SAMPLES
+        remainder = len(audio_16k) % CHUNK_SAMPLES
+        if remainder != 0:
+            audio_16k = np.pad(audio_16k, (0, CHUNK_SAMPLES - remainder), mode="constant")
+
+        padded_audio = np.pad(audio_16k, (lead_samples, tail_samples), mode="constant")
+        num_chunks = len(padded_audio) // CHUNK_SAMPLES
 
         mel_history = []
         embeddings = []
 
         for i in range(num_chunks):
-            chunk = audio_16k[i * CHUNK_SAMPLES : (i + 1) * CHUNK_SAMPLES].astype(np.float32).reshape(1, CHUNK_SAMPLES)
+            chunk = padded_audio[i * CHUNK_SAMPLES : (i + 1) * CHUNK_SAMPLES].astype(np.float32).reshape(1, CHUNK_SAMPLES)
             if self.backend == "onnxruntime":
                 inp_name = self.melspec_session.get_inputs()[0].name
                 raw_mel = self.melspec_session.run(None, {inp_name: chunk})[0]
@@ -374,14 +396,35 @@ def extract_and_cache_features(
     extractor: FeatureExtractor,
     cache_path: Path,
     desc: str,
+    force_recompute: bool = False,
 ) -> List[np.ndarray]:
     """Batch extract features from all WAV files in directory and cache to disk."""
-    if cache_path.exists():
-        logger.info(t("train.cache_found", name=cache_path.name))
-        data = np.load(str(cache_path), allow_pickle=True)
-        return list(data)
+    wav_files = find_wav_files(audio_dir)
 
-    wav_files = sorted(list(audio_dir.glob("*.wav")))
+    if cache_path.exists() and not force_recompute:
+        try:
+            data = np.load(str(cache_path), allow_pickle=True)
+            if len(data) > 0:
+                if len(wav_files) == 0 or len(data) >= len(wav_files):
+                    logger.info(t("train.cache_found", name=cache_path.name) + f" ({len(data)} items)")
+                    return list(data)
+                else:
+                    logger.warning(
+                        "Cache %s has %d items, but audio directory %s has %d files. Invalidating stale cache and re-extracting...",
+                        cache_path.name, len(data), audio_dir.name, len(wav_files)
+                    )
+            else:
+                logger.warning(
+                    "Cache %s exists but is empty (0 items). Invalidation triggered for %s...",
+                    cache_path.name, desc
+                )
+        except Exception as e:
+            logger.warning("Failed to read cache %s (%s). Re-extracting...", cache_path.name, e)
+
+    if not wav_files:
+        logger.warning("No WAV files found in %s for %s features.", audio_dir, desc)
+        return []
+
     logger.info(t("train.extracting_features", desc=desc, count=len(wav_files)))
 
     features_list = []
@@ -414,14 +457,21 @@ def evaluate_model(
     model: nn.Module,
     val_pos_features: List[np.ndarray],
     val_neg_mmap: Optional[np.ndarray],
+    val_hard_neg_features: Optional[List[np.ndarray]] = None,
     context_len: int = 16,
     embedding_dim: int = 96,
     cutoff: float = 0.5,
-) -> Tuple[float, float]:
-    """Evaluate recall and estimated False Alarms Per Hour (FAPH)."""
+) -> Tuple[float, float, float]:
+    """
+    Evaluate:
+      1. Recall on positive wake words (target: >= 95%)
+      2. Hard Negative Rejection Rate on confusable words & noise (target: >= 98%)
+      3. Estimated False Alarms Per Hour (FAPH) on general audio (target: <= 0.2/hr)
+    """
     model.eval()
     device = next(model.parameters()).device
 
+    # 1. Recall on positive wake word features
     pos_correct = 0
     pos_total = 0
     with torch.no_grad():
@@ -444,6 +494,35 @@ def evaluate_model(
 
     recall = (pos_correct / pos_total) if pos_total > 0 else 0.0
 
+    # 2. Hard Negative Rejection Rate on confusable words and noise
+    hard_neg_correct = 0
+    hard_neg_total = 0
+    if val_hard_neg_features:
+        with torch.no_grad():
+            for feat in val_hard_neg_features:
+                if len(feat) >= context_len:
+                    for i in range(0, len(feat) - context_len + 1, 2):
+                        win_np = feat[i : i + context_len]
+                        if win_np.shape != (context_len, embedding_dim):
+                            win_np = win_np.reshape(context_len, embedding_dim)
+                        win = torch.from_numpy(np.array(win_np, dtype=np.float32, copy=True)).unsqueeze(0).to(device)
+                        pred = model(win).item()
+                        if pred < cutoff:
+                            hard_neg_correct += 1
+                        hard_neg_total += 1
+                elif len(feat) > 0:
+                    win_np = np.pad(feat, ((context_len - len(feat), 0), (0, 0)), mode="constant")
+                    if win_np.shape != (context_len, embedding_dim):
+                        win_np = win_np.reshape(context_len, embedding_dim)
+                    win = torch.from_numpy(np.array(win_np, dtype=np.float32, copy=True)).unsqueeze(0).to(device)
+                    pred = model(win).item()
+                    if pred < cutoff:
+                        hard_neg_correct += 1
+                    hard_neg_total += 1
+
+    hard_neg_rejection = (hard_neg_correct / hard_neg_total) if hard_neg_total > 0 else 1.0
+
+    # 3. Estimated False Alarms Per Hour (FAPH) on validation set features
     false_positives = 0
     total_hours = 0.0
 
@@ -486,7 +565,7 @@ def evaluate_model(
     else:
         faph = 0.0
 
-    return recall, faph
+    return recall, hard_neg_rejection, faph
 
 
 # ==============================================================================
@@ -875,6 +954,69 @@ def save_model_artifacts(
 
 
 # ==============================================================================
+# Data and Features Pre-flight Audit
+# ==============================================================================
+def check_and_report_training_data(data_dir: Path) -> None:
+    """Audit all 8 training data components and print diagnostic report."""
+    print("======================================================================")
+    print("🔍 Pre-flight Training Data & Feature Diagnostic Audit")
+    print(f"   Base Data Directory: {data_dir}")
+    print("======================================================================")
+
+    # 1. RIR
+    rirs_dir = data_dir / "mit_rirs"
+    rir_files = find_wav_files(rirs_dir)
+    print(f"1. MIT RIR Impulse Responses:       {'✅' if rir_files else '⚠️'} {len(rir_files)} files in {rirs_dir}")
+
+    # 2. Noise
+    noise_dir = data_dir / "noise"
+    noise_files = find_wav_files(noise_dir)
+    print(f"2. Environmental Noise (ESC-50):    {'✅' if noise_files else '⚠️'} {len(noise_files)} files in {noise_dir}")
+
+    # 3. Synthetic speech
+    pos_synth = find_wav_files(data_dir / "synthetic_speech" / "positive")
+    neg_synth = find_wav_files(data_dir / "synthetic_speech" / "negative")
+    print(f"3. Synthetic Speech (TTS):          {'✅' if pos_synth else '❌'} Positive: {len(pos_synth)} | Negative: {len(neg_synth)}")
+
+    # 4. Augmented speech
+    pos_aug = find_wav_files(data_dir / "augmented" / "positive")
+    neg_aug = find_wav_files(data_dir / "augmented" / "negative")
+    print(f"4. Augmented Audio:                 {'✅' if pos_aug else '⚠️'} Positive: {len(pos_aug)} | Negative: {len(neg_aug)}")
+
+    # 5. Feature cache
+    cache_dir = data_dir / "features_cache"
+    pos_cache = cache_dir / "pos_feats.npy"
+    neg_cache = cache_dir / "neg_feats.npy"
+    pos_c_len = len(np.load(str(pos_cache), allow_pickle=True)) if pos_cache.exists() else 0
+    neg_c_len = len(np.load(str(neg_cache), allow_pickle=True)) if neg_cache.exists() else 0
+    print(f"5. Features Cache:                  {'✅' if pos_c_len else '⚠️'} pos_feats: {pos_c_len} | neg_feats: {neg_c_len}")
+
+    # 6. ACAV100M negative features
+    acav_p = data_dir / "negative_features" / "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+    if acav_p.exists():
+        try:
+            m = np.load(str(acav_p), mmap_mode="r")
+            print(f"6. ACAV100M 2000hr Negative Mmap:   ✅ {len(m):,} frames ({m.shape}, {m.dtype})")
+        except Exception as e:
+            print(f"6. ACAV100M Negative Mmap:          ❌ Error reading: {e}")
+    else:
+        print(f"6. ACAV100M Negative Mmap:          ⚠️ Not found ({acav_p.name})")
+
+    # 7. Validation features
+    val_p = data_dir / "negative_features" / "validation_set_features.npy"
+    if val_p.exists():
+        try:
+            vm = np.load(str(val_p), mmap_mode="r")
+            print(f"7. Validation Set Features:         ✅ {len(vm):,} frames ({vm.shape}, {vm.dtype})")
+        except Exception as e:
+            print(f"7. Validation Set Features:         ❌ Error reading: {e}")
+    else:
+        print(f"7. Validation Set Features:         ⚠️ Not found ({val_p.name})")
+
+    print("======================================================================\n")
+
+
+# ==============================================================================
 # Main Training Function
 # ==============================================================================
 def main():
@@ -885,6 +1027,16 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument("--device", default=None, help="PyTorch training device (auto, cpu, cuda, xpu)")
     parser.add_argument("--feature-device", default=None, help="Feature extraction device (auto, CPU, GPU)")
+    parser.add_argument(
+        "--recompute-features",
+        action="store_true",
+        help="Force recomputing features from audio directories instead of loading from features_cache",
+    )
+    parser.add_argument(
+        "--check-data",
+        action="store_true",
+        help="Perform pre-flight verification of all data directories and feature caches without training",
+    )
     parser.add_argument(
         "--export-only",
         action="store_true",
@@ -986,6 +1138,11 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     final_onnx_path = output_dir / f"{model_name}.onnx"
 
+    # Pre-flight data diagnostic check mode
+    if args.check_data:
+        check_and_report_training_data(data_dir)
+        return
+
     print("======================================================================")
     print(t("train.header_title"))
     print(t("train.target_model", name=model_name))
@@ -1054,15 +1211,31 @@ def main():
     aug_pos_dir = data_dir / "augmented" / "positive"
     aug_neg_dir = data_dir / "augmented" / "negative"
 
-    if not aug_pos_dir.exists() or len(list(aug_pos_dir.glob("*.wav"))) == 0:
+    aug_pos_files = find_wav_files(aug_pos_dir)
+    if not aug_pos_files:
         aug_pos_dir = data_dir / "synthetic_speech" / "positive"
+        aug_pos_files = find_wav_files(aug_pos_dir)
 
-    if not aug_neg_dir.exists() or len(list(aug_neg_dir.glob("*.wav"))) == 0:
+    aug_neg_files = find_wav_files(aug_neg_dir)
+    if not aug_neg_files:
         aug_neg_dir = data_dir / "synthetic_speech" / "negative"
+        aug_neg_files = find_wav_files(aug_neg_dir)
 
     cache_dir = data_dir / "features_cache"
-    pos_features = extract_and_cache_features(aug_pos_dir, extractor, cache_dir / "pos_feats.npy", "positive")
-    neg_features = extract_and_cache_features(aug_neg_dir, extractor, cache_dir / "neg_feats.npy", "negative") if aug_neg_dir.exists() else []
+    pos_features = extract_and_cache_features(
+        audio_dir=aug_pos_dir,
+        extractor=extractor,
+        cache_path=cache_dir / "pos_feats.npy",
+        desc="positive",
+        force_recompute=args.recompute_features,
+    )
+    neg_features = extract_and_cache_features(
+        audio_dir=aug_neg_dir,
+        extractor=extractor,
+        cache_path=cache_dir / "neg_feats.npy",
+        desc="negative",
+        force_recompute=args.recompute_features,
+    ) if (aug_neg_dir.exists() and len(aug_neg_files) > 0) else []
 
     # 3. Memory map ACAV100M negative features
     acav_path = data_dir / "negative_features" / "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
@@ -1096,6 +1269,21 @@ def main():
         embedding_dim=embedding_dim,
         samples_per_epoch=steps * batch_size,
     )
+
+    print("----------------------------------------------------------------------")
+    print("📊 Training Dataset Distribution & Activation Verification:")
+    print(f"   - Positive Audio Sources: {len(pos_features)} files -> {len(dataset.pos_windows):,} positive windows")
+    print(f"   - Hard Negative Sources:  {len(neg_features)} files -> {len(dataset.neg_windows):,} negative windows")
+    print(f"   - ACAV100M Negative Speech: {len(acav_mmap):,} frames (Active: {dataset.has_acav})" if dataset.has_acav else "   - ACAV100M: Not active")
+    print(f"   - Validation Evaluation:    {len(val_mmap):,} frames" if val_mmap is not None else "   - Validation: Not loaded")
+    print(f"   - Batch Sampling:         50% Positive, 50% Negative (60% ACAV + 40% Hard Negatives)")
+    print(f"   - Loss Function Penalty:  Negative False Positive Weight = 2.5x")
+    if len(dataset.neg_windows) == 0:
+        logger.warning(
+            "⚠️  0 hard negative windows found! If you have generated negative audio or ESC-50 noise, "
+            "run with --recompute-features to invalidate stale cache."
+        )
+    print("----------------------------------------------------------------------")
 
     loader = DataLoader(
         dataset,
@@ -1154,15 +1342,16 @@ def main():
             )
 
         if step % 2000 == 0 or step == steps:
-            recall, faph = evaluate_model(
-                model,
-                pos_features,
-                val_mmap,
+            recall, hard_neg_rejection, faph = evaluate_model(
+                model=model,
+                val_pos_features=pos_features,
+                val_neg_mmap=val_mmap,
+                val_hard_neg_features=neg_features,
                 context_len=context_length,
                 embedding_dim=embedding_dim,
                 cutoff=0.5,
             )
-            print(f"\n  {t('train.val_stats', step=step, recall=recall * 100, faph=faph)}")
+            print(f"\n  {t('train.val_stats', step=step, recall=recall * 100, hard_neg=hard_neg_rejection * 100, faph=faph)}")
             model.train()
 
     print()

@@ -83,7 +83,7 @@ train:
   validation_loaded: "Validation set loaded successfully ({count} frames)"
   start_training: "Starting model training (total steps: {steps})..."
   step_progress: "[Step {step:05d}/{steps}] Loss: {loss:.5f} | LR: {lr:.6f}"
-  val_stats: "Validation (Step {step}): Recall = {recall:.1f}%, Est. False Alarms/Hour (FAPH) = {faph:.2f}"
+  val_stats: "Validation (Step {step}): Recall = {recall:.1f}%, Hard-Neg Reject = {hard_neg:.1f}%, Est. False Alarms/Hour (FAPH) = {faph:.2f}"
   training_complete: "Training complete! Elapsed time: {elapsed:.1f}s"
   exporting_onnx: "Exporting NPU-optimized static ONNX model: {path} ..."
   onnx_verified: "ONNX structure verified (no dangling nodes or dynamic shapes)"

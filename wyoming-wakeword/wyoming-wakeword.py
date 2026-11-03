@@ -109,6 +109,7 @@ class SingleModelConfig:
     cutoff: Optional[float] = None
     refractory: Optional[float] = None
     trigger_level: Optional[int] = None
+    sliding_window_size: Optional[int] = None
     device: Optional[str] = None
     languages: List[str] = field(default_factory=lambda: ["en"])
 
@@ -123,6 +124,7 @@ class WakewordServerConfig:
     default_cutoff: float = 0.5
     default_refractory: float = 2.0
     default_trigger_level: int = 1
+    default_sliding_window_size: int = 1
     melspec_model_path: Optional[str] = None
     melspec_device: Optional[str] = None
     embedding_model_path: Optional[str] = None
@@ -283,6 +285,7 @@ class LoadedClassifier:
         effective_cutoff: float = 0.5,
         effective_refractory: float = 2.0,
         trigger_level: int = 1,
+        sliding_window_size: int = 1,
     ) -> None:
         self.config = config
         self.compiled_model = compiled_model
@@ -292,6 +295,7 @@ class LoadedClassifier:
         self._effective_cutoff = effective_cutoff
         self._effective_refractory = effective_refractory
         self._trigger_level = max(1, int(trigger_level))
+        self._sliding_window_size = max(1, int(sliding_window_size))
         self.last_triggered_time: float = 0.0
 
     @property
@@ -317,6 +321,14 @@ class LoadedClassifier:
     @trigger_level.setter
     def trigger_level(self, value: int) -> None:
         self._trigger_level = max(1, int(value))
+
+    @property
+    def sliding_window_size(self) -> int:
+        return self._sliding_window_size
+
+    @sliding_window_size.setter
+    def sliding_window_size(self, value: int) -> None:
+        self._sliding_window_size = max(1, int(value))
 
     @property
     def refractory(self) -> float:
@@ -467,6 +479,7 @@ class WakeWordEngine:
         cutoff = m_cfg.cutoff if m_cfg.cutoff is not None else self.config.default_cutoff
         refractory = m_cfg.refractory if m_cfg.refractory is not None else self.config.default_refractory
         trigger_level = m_cfg.trigger_level if m_cfg.trigger_level is not None else self.config.default_trigger_level
+        sliding_window_size = m_cfg.sliding_window_size if m_cfg.sliding_window_size is not None else self.config.default_sliding_window_size
 
         path = Path(m_cfg.model_path).expanduser().resolve()
         if not path.exists():
@@ -526,6 +539,7 @@ class WakeWordEngine:
             effective_cutoff=cutoff,
             effective_refractory=refractory,
             trigger_level=trigger_level,
+            sliding_window_size=sliding_window_size,
         )
         self.classifiers[m_cfg.name] = classifier
         logger.info(
@@ -535,6 +549,7 @@ class WakeWordEngine:
                 phrase=classifier.phrase,
                 cutoff=classifier.cutoff,
                 trigger_level=classifier.trigger_level,
+                sliding_window_size=classifier.sliding_window_size,
                 refractory=classifier.refractory,
                 device=classifier.actual_device,
             )
@@ -563,6 +578,7 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
         self.melspec_buffer = np.zeros((MEL_HISTORY_FRAMES, 32), dtype=np.float32)
         self.embedding_buffer = np.zeros((DEFAULT_CONTEXT_LEN, EMBEDDING_DIM), dtype=np.float32)
         self.model_hits: Dict[str, int] = defaultdict(int)
+        self.score_windows: Dict[str, deque] = {}
         self.has_detected = False
 
     async def handle_event(self, event: Event) -> bool:
@@ -647,6 +663,8 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
         self.melspec_buffer.fill(0)
         self.embedding_buffer.fill(0)
         self.model_hits.clear()
+        for dq in self.score_windows.values():
+            dq.clear()
         self.has_detected = False
 
     def _on_detected_cooldown(self) -> None:
@@ -682,20 +700,33 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                     inp_emb = emb_window.reshape(1, model.context_len, EMBEDDING_DIM)
                     score = model.predict(inp_emb)
 
-            if score >= model.cutoff:
+            if model.name not in self.score_windows or self.score_windows[model.name].maxlen != model.sliding_window_size:
+                self.score_windows[model.name] = deque(maxlen=model.sliding_window_size)
+
+            dq = self.score_windows[model.name]
+            dq.append(score)
+
+            # Compute sliding window mean average if window size > 1
+            if model.sliding_window_size > 1 and len(dq) > 0:
+                eval_score = float(sum(dq) / len(dq))
+            else:
+                eval_score = score
+
+            if eval_score >= model.cutoff:
                 self.model_hits[model.name] += 1
             else:
                 self.model_hits[model.name] = 0
 
             hits = self.model_hits[model.name]
-            if score > 0.05 or hits > 0:
+            if score > 0.05 or eval_score > 0.05 or hits > 0:
                 logger.debug(
-                    "Model [%s] score: %.4f (cutoff: %.2f, hits: %d/%d)",
-                    model.name, score, model.cutoff, hits, model.trigger_level
+                    "Model [%s] score: %.4f (win_avg: %.4f, cutoff: %.2f, hits: %d/%d, win: %d/%d)",
+                    model.name, score, eval_score, model.cutoff, hits, model.trigger_level, len(dq), model.sliding_window_size
                 )
 
-            if model.check_trigger(score, now, current_hits=hits):
+            if model.check_trigger(eval_score, now, current_hits=hits):
                 self.model_hits[model.name] = 0
+                dq.clear()
                 return model
 
         return None
@@ -773,6 +804,12 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
     default_trigger_level = _safe_int(
         raw_dict.get("default_trigger_level") or raw_dict.get("trigger_level"), 1
     )
+    default_sliding_window_size = _safe_int(
+        raw_dict.get("default_sliding_window_size")
+        or raw_dict.get("sliding_window_size")
+        or raw_dict.get("window_size"),
+        1,
+    )
 
     melspec_model = feat_sec.get("melspec_model") or raw_dict.get("melspec_model")
     melspec_device = feat_sec.get("melspec_device") or raw_dict.get("melspec_device")
@@ -787,6 +824,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         default_cutoff=default_cutoff,
         default_refractory=default_refractory,
         default_trigger_level=default_trigger_level,
+        default_sliding_window_size=default_sliding_window_size,
         melspec_model_path=str(melspec_model) if melspec_model else None,
         melspec_device=str(melspec_device) if melspec_device else None,
         embedding_model_path=str(embedding_model) if embedding_model else None,
@@ -806,6 +844,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         cutoff_raw = item.get("cutoff")
         refractory_raw = item.get("refractory")
         trigger_level_raw = item.get("trigger_level")
+        sliding_window_size_raw = item.get("sliding_window_size") or item.get("window_size")
 
         model_entry = SingleModelConfig(
             name=str(m_name),
@@ -814,6 +853,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
             cutoff=_safe_float(cutoff_raw, cfg.default_cutoff) if cutoff_raw is not None else None,
             refractory=_safe_float(refractory_raw, cfg.default_refractory) if refractory_raw is not None else None,
             trigger_level=_safe_int(trigger_level_raw, cfg.default_trigger_level) if trigger_level_raw is not None else None,
+            sliding_window_size=_safe_int(sliding_window_size_raw, cfg.default_sliding_window_size) if sliding_window_size_raw is not None else None,
             device=item.get("device"),
             languages=item.get("languages", ["en"]),
         )
@@ -863,6 +903,13 @@ def main(
         "--trigger-level",
         "--trigger_level",
         help=t("cli.options.trigger_level"),
+    ),
+    sliding_window_size: Optional[int] = typer.Option(
+        None,
+        "--sliding-window-size",
+        "--sliding_window_size",
+        "--window-size",
+        help=t("cli.options.sliding_window_size"),
     ),
     refractory: Optional[float] = typer.Option(
         None,
@@ -922,6 +969,8 @@ def main(
         server_config.default_cutoff = cutoff
     if trigger_level is not None:
         server_config.default_trigger_level = max(1, trigger_level)
+    if sliding_window_size is not None:
+        server_config.default_sliding_window_size = max(1, sliding_window_size)
     if refractory is not None:
         server_config.default_refractory = refractory
     if melspec_model is not None:
@@ -943,6 +992,7 @@ def main(
                 cutoff=cutoff,
                 refractory=refractory,
                 trigger_level=trigger_level,
+                sliding_window_size=sliding_window_size,
                 device=device,
             )
             existing_idx = next(
@@ -971,6 +1021,7 @@ def main(
                             cutoff=cutoff,
                             refractory=refractory,
                             trigger_level=trigger_level,
+                            sliding_window_size=sliding_window_size,
                             device=device,
                         )
                     )

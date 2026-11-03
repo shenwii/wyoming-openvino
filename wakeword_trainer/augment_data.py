@@ -120,6 +120,42 @@ def time_shift_and_pad(audio: np.ndarray, max_shift_sec: float) -> np.ndarray:
     return padded
 
 
+def find_wav_files(dir_path: Path) -> List[Path]:
+    """Find all WAV files in directory recursively (case-insensitive for Linux)."""
+    if not dir_path.exists():
+        return []
+    return sorted([p for p in dir_path.glob("**/*") if p.is_file() and p.suffix.lower() == ".wav"])
+
+
+def generate_pure_noise_sample(
+    noise_files: List[Path],
+    rir_files: List[Path],
+    duration_sec: float = 2.5,
+    rir_prob: float = 0.5,
+) -> np.ndarray:
+    """Extract a pure environmental noise slice and optionally apply room impulse response."""
+    noise_path = random.choice(noise_files)
+    noise_audio = load_wav_16k(noise_path)
+    target_samples = int(duration_sec * TARGET_SAMPLE_RATE)
+    if len(noise_audio) < target_samples:
+        repeats = int(math.ceil(target_samples / max(1, len(noise_audio))))
+        noise_audio = np.tile(noise_audio, repeats)
+    max_start = max(0, len(noise_audio) - target_samples)
+    start_idx = random.randint(0, max_start) if max_start > 0 else 0
+    clip = noise_audio[start_idx : start_idx + target_samples]
+
+    if rir_files and random.random() < rir_prob:
+        rir_path = random.choice(rir_files)
+        try:
+            rir_audio = load_wav_16k(rir_path)
+            clip = apply_rir(clip, rir_audio)
+        except Exception:
+            pass
+
+    clip = clip * random.uniform(0.5, 1.2)
+    return clip[:target_samples]
+
+
 def augment_single_audio(
     clean_audio: np.ndarray,
     rir_files: List[Path],
@@ -186,12 +222,12 @@ def main():
     pos_out_dir = aug_out_dir / "positive"
     neg_out_dir = aug_out_dir / "negative"
 
-    # Collect RIR and noise files
+    # Collect RIR and noise files (case-insensitive and recursive)
     rirs_dir = data_dir / "mit_rirs"
     noise_dir = data_dir / "noise"
 
-    rir_files = list(rirs_dir.glob("**/*.wav")) if rirs_dir.exists() else []
-    noise_files = list(noise_dir.glob("**/*.wav")) if noise_dir.exists() else []
+    rir_files = find_wav_files(rirs_dir)
+    noise_files = find_wav_files(noise_dir)
 
     snr_range = tuple(aug_cfg.get("snr_db_range", [5.0, 25.0]))
     rir_prob = float(aug_cfg.get("rir_probability", 0.75))
@@ -201,20 +237,25 @@ def main():
     print("🎛️  Acoustic Environment Simulation & Audio Augmentation")
     print(f"   - Input directory: {synth_dir}")
     print(f"   - Output directory: {aug_out_dir}")
-    print(f"   - RIR files found: {len(rir_files)}")
-    print(f"   - Noise files found: {len(noise_files)}")
+    print(f"   - RIR files found: {len(rir_files)} ({rirs_dir})")
+    print(f"   - Noise files found: {len(noise_files)} ({noise_dir})")
     print(f"   - SNR range: {snr_range[0]} ~ {snr_range[1]} dB")
     print(f"   - RIR probability: {rir_prob * 100:.0f}%")
     print("======================================================================")
 
-    pos_files = list(pos_in_dir.glob("*.wav")) if pos_in_dir.exists() else []
-    neg_files = list(neg_in_dir.glob("*.wav")) if neg_in_dir.exists() else []
+    pos_files = find_wav_files(pos_in_dir)
+    neg_files = find_wav_files(neg_in_dir)
 
     if not pos_files:
         logger.error("No positive WAV files found in %s! Run generate_tts.py first.", pos_in_dir)
         sys.exit(1)
 
-    total_tasks = [("positive", pos_files, pos_out_dir), ("negative", neg_files, neg_out_dir)]
+    total_tasks = [("positive", pos_files, pos_out_dir)]
+    if neg_files:
+        total_tasks.append(("negative", neg_files, neg_out_dir))
+    else:
+        logger.info("No synthetic speech negative files found in %s.", neg_in_dir)
+
     manifest = []
 
     for split_name, file_list, out_dir in total_tasks:
@@ -249,6 +290,36 @@ def main():
 
         print()
         logger.info(t("augment.augment_complete", desc=split_name, path=out_dir, count=count))
+
+    # 3. Generate pure background noise negative samples from noise_files (ESC-50)
+    # This guarantees that environmental noise (typing, rain, appliances, dog barking)
+    # directly participates in training as negative samples (label 0.0)
+    include_pure_noise = aug_cfg.get("include_pure_noise_negatives", True)
+    pure_noise_target = int(aug_cfg.get("pure_noise_samples", min(1000, max(500, len(pos_files) // 2))))
+    if include_pure_noise and noise_files and pure_noise_target > 0:
+        logger.info("Generating %d pure environmental noise negative samples from %d noise files...", pure_noise_target, len(noise_files))
+        neg_out_dir.mkdir(parents=True, exist_ok=True)
+        noise_count = 0
+        for i in range(pure_noise_target):
+            clip = generate_pure_noise_sample(
+                noise_files=noise_files,
+                rir_files=rir_files,
+                duration_sec=random.uniform(2.0, 3.0),
+                rir_prob=rir_prob,
+            )
+            out_name = f"aug_noise_env_{i:04d}.wav"
+            save_wav_16k(clip, neg_out_dir / out_name)
+            manifest.append({
+                "filename": out_name,
+                "split": "negative",
+                "is_positive": False,
+                "source": "environmental_noise_esc50",
+            })
+            noise_count += 1
+            if noise_count % 100 == 0 or noise_count == pure_noise_target:
+                print(f"\r  [PURE NOISE NEGATIVES] {noise_count}/{pure_noise_target}", end="", flush=True)
+        print()
+        logger.info("✅ Generated %d pure environmental noise negative samples in %s", noise_count, neg_out_dir)
 
     manifest_path = aug_out_dir / "augmented_manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:

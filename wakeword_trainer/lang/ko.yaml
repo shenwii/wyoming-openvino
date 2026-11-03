@@ -83,7 +83,7 @@ train:
   validation_loaded: "✅ 검증 데이터셋 로드 완료 ({count} 프레임)"
   start_training: "🚀 모델 학습 루프 시작 (총 스텝: {steps})..."
   step_progress: "  [Step {step:05d}/{steps}] 손실: {loss:.5f} | 학습률: {lr:.6f}"
-  val_stats: "  📈 중간 검증 (Step {step}): 재현율 (Recall) = {recall:.1f}%, 예상 오발화율 (FAPH) = {faph:.2f}회/시간"
+  val_stats: "  📈 중간 검증 (Step {step}): 재현율 (Recall) = {recall:.1f}%, 부정어 거부율 (Hard-Neg Reject) = {hard_neg:.1f}%, 예상 오발화율 (FAPH) = {faph:.2f}회/시간"
   training_complete: "✅ 학습 완료! 소요 시간: {elapsed:.1f}초"
   exporting_onnx: "NPU 최적화 정적 ONNX 모델 내보내는 중: {path} ..."
   onnx_verified: "✅ ONNX 구조 검증 완료 (미연결 노드 또는 동적 형상 없음)"

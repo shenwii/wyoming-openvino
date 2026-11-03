@@ -83,7 +83,7 @@ train:
   validation_loaded: "✅ 検証データセットの読み込み完了 ({count} フレーム)"
   start_training: "🚀 モデル学習ループ開始 (総ステップ数: {steps})..."
   step_progress: "  [Step {step:05d}/{steps}] 損失: {loss:.5f} | 学習率: {lr:.6f}"
-  val_stats: "  📈 段階検証 (Step {step}): 再現率 (Recall) = {recall:.1f}%, 推定誤検出率 (FAPH) = {faph:.2f}回/時間"
+  val_stats: "  📈 段階検証 (Step {step}): 再現率 (Recall) = {recall:.1f}%, 負例拒絶率 (Hard-Neg Reject) = {hard_neg:.1f}%, 推定誤検出率 (FAPH) = {faph:.2f}回/時間"
   training_complete: "✅ 学習完了！所要時間: {elapsed:.1f} 秒"
   exporting_onnx: "NPU 最適化静的 ONNX モデルを出力中: {path} ..."
   onnx_verified: "✅ ONNX 構造検証完了 (未接続ノードや動的形状なし)"

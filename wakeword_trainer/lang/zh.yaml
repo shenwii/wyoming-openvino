@@ -83,7 +83,7 @@ train:
   validation_loaded: "✅ 假阳性评估验证集加载成功 (共 {count} 帧)"
   start_training: "🚀 开始模型训练迭代 (总步数: {steps})..."
   step_progress: "  [Step {step:05d}/{steps}] 损失值: {loss:.5f} | 学习率: {lr:.6f}"
-  val_stats: "  📈 阶段验证 (Step {step}): 召回率 (Recall) = {recall:.1f}%, 估计误报率 (FAPH) = {faph:.2f}次/小时"
+  val_stats: "  📈 阶段验证 (Step {step}): 召回率 (Recall) = {recall:.1f}%, 负样本拒识率 (Hard-Neg Reject) = {hard_neg:.1f}%, 估计误报率 (FAPH) = {faph:.2f}次/小时"
   training_complete: "✅ 训练完成！耗时: {elapsed:.1f} 秒"
   exporting_onnx: "正在导出 NPU 优化 ONNX 模型: {path} ..."
   onnx_verified: "✅ ONNX 结构校验通过 (无悬挂节点与动态形状)"
