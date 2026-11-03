@@ -490,8 +490,79 @@ def evaluate_model(
 
 
 # ==============================================================================
-# NPU ONNX Export
+# NPU ONNX Export & External Data Bundler
 # ==============================================================================
+def bundle_external_data_to_single_onnx(
+    onnx_path: Path,
+    output_path: Optional[Path] = None,
+    data_path: Optional[Path] = None,
+) -> bool:
+    """Bundle an ONNX model that references external data (.data) into a self-contained single ONNX file."""
+    if onnx is None:
+        logger.error("The 'onnx' package is required to bundle external data. Please install it with: pip install onnx")
+        return False
+
+    from onnx.external_data_helper import convert_model_from_external_data, load_external_data_for_model
+
+    onnx_path = Path(onnx_path).resolve()
+    if not onnx_path.exists():
+        logger.error("Input ONNX file not found: %s", onnx_path)
+        return False
+
+    out_file = Path(output_path).resolve() if output_path else onnx_path
+    temp_out = out_file.with_suffix(".bundled.tmp.onnx")
+
+    try:
+        logger.info("Loading ONNX model: %s", onnx_path)
+        model = onnx.load(str(onnx_path), load_external_data=False)
+
+        has_external = False
+        for init in model.graph.initializer:
+            if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+                has_external = True
+                for entry in init.external_data:
+                    if entry.key == "location":
+                        expected_file = onnx_path.parent / entry.value
+                        if not expected_file.exists():
+                            if data_path and Path(data_path).exists():
+                                entry.value = Path(data_path).name
+                            else:
+                                candidates = (
+                                    list(onnx_path.parent.glob("*.data"))
+                                    + list(onnx_path.parent.glob("*.tmp.onnx.data"))
+                                )
+                                if candidates:
+                                    logger.info("Auto-mapped external data file '%s' -> '%s'", entry.value, candidates[0].name)
+                                    entry.value = candidates[0].name
+
+        if not has_external:
+            logger.info("Model %s is already self-contained (no external data found).", onnx_path)
+            return True
+
+        load_external_data_for_model(model, base_dir=str(onnx_path.parent))
+        convert_model_from_external_data(model)
+        onnx.save_model(model, str(temp_out), save_as_external_data=False)
+
+        verified_model = onnx.load(str(temp_out), load_external_data=False)
+        onnx.checker.check_model(verified_model)
+        for init in verified_model.graph.initializer:
+            if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+                raise RuntimeError(f"Initializer '{init.name}' still references external data.")
+
+        if out_file.exists():
+            out_file.unlink()
+        temp_out.rename(out_file)
+
+        final_size_kb = out_file.stat().st_size / 1024
+        logger.info("✅ Successfully bundled into single ONNX file: %s (%.1f KB)", out_file, final_size_kb)
+        return True
+    except Exception as exc:
+        logger.error("Failed to bundle external data into single ONNX: %s", exc)
+        if temp_out.exists():
+            temp_out.unlink()
+        return False
+
+
 def export_npu_optimized_onnx(
     model: nn.Module,
     output_onnx_path: Path,
@@ -499,7 +570,9 @@ def export_npu_optimized_onnx(
     embedding_dim: int = 96,
     opset: int = 17,
 ) -> bool:
-    """Export static ONNX model optimized for Intel NPU."""
+    """Export static ONNX model optimized for Intel NPU with strictly embedded weights."""
+    import inspect
+
     model.eval()
     dummy_input = torch.zeros(1, context_length, embedding_dim, dtype=torch.float32)
 
@@ -509,21 +582,65 @@ def export_npu_optimized_onnx(
     logger.info(t("train.exporting_onnx", path=output_onnx_path.name))
 
     try:
-        torch.onnx.export(
-            model,
-            dummy_input,
-            str(temp_onnx),
-            input_names=["input"],
-            output_names=["output"],
-            opset_version=opset,
-            do_constant_folding=True,
-            dynamic_axes=None,  # Strictly static for NPU driver stability
-        )
+        export_kwargs = {
+            "input_names": ["input"],
+            "output_names": ["output"],
+            "opset_version": opset,
+            "do_constant_folding": True,
+            "dynamic_axes": None,  # Strictly static for NPU driver stability
+        }
 
+        # Inspect torch.onnx.export signature across PyTorch versions
+        sig = inspect.signature(torch.onnx.export)
+        if "export_params" in sig.parameters:
+            export_kwargs["export_params"] = True
+        if "dynamo" in sig.parameters:
+            # Disable dynamo in PyTorch 2.5+ to ensure TorchScript embeds all weights directly
+            export_kwargs["dynamo"] = False
+        if "use_external_data_format" in sig.parameters:
+            export_kwargs["use_external_data_format"] = False
+
+        try:
+            torch.onnx.export(model, dummy_input, str(temp_onnx), **export_kwargs)
+        except TypeError:
+            torch.onnx.export(
+                model,
+                dummy_input,
+                str(temp_onnx),
+                input_names=["input"],
+                output_names=["output"],
+                opset_version=opset,
+                do_constant_folding=True,
+                dynamic_axes=None,
+            )
+
+        # Guarantee all weights are embedded directly if onnx is available
         if onnx is not None:
-            onnx_model = onnx.load(str(temp_onnx))
+            try:
+                from onnx.external_data_helper import convert_model_from_external_data
+                onnx_model = onnx.load(str(temp_onnx), load_external_data=True)
+                convert_model_from_external_data(onnx_model)
+                onnx.save_model(onnx_model, str(temp_onnx), save_as_external_data=False)
+            except Exception as e:
+                logger.debug("convert_model_from_external_data step skipped: %s", e)
+
+            # Verification
+            onnx_model = onnx.load(str(temp_onnx), load_external_data=False)
             onnx.checker.check_model(onnx_model)
+            for init in onnx_model.graph.initializer:
+                if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+                    raise RuntimeError(
+                        f"ONNX model still references external data for '{init.name}'. "
+                        "All weights must be embedded into the single .onnx file."
+                    )
             logger.info(t("train.onnx_verified"))
+
+        # Clean up any external data files created during export
+        for ext_f in temp_onnx.parent.glob(f"{temp_onnx.name}*.data*"):
+            try:
+                ext_f.unlink()
+            except OSError:
+                pass
 
         test_inp = np.random.randn(1, context_length, embedding_dim).astype(np.float32)
         with torch.no_grad():
@@ -535,14 +652,30 @@ def export_npu_optimized_onnx(
             np.testing.assert_allclose(torch_out, ort_out, rtol=1e-3, atol=1e-4)
             logger.info(t("train.onnx_numerical_match"))
 
+        if output_onnx_path.exists():
+            output_onnx_path.unlink()
         temp_onnx.rename(output_onnx_path)
-        logger.info(t("train.export_success", path=output_onnx_path, size=output_onnx_path.stat().st_size / 1024))
+
+        final_size_kb = output_onnx_path.stat().st_size / 1024
+        if final_size_kb < 50:
+            logger.warning(
+                "Exported ONNX file size is unusually small (%.1f KB). "
+                "Expected ~400 KB. Model weights may not be embedded correctly!",
+                final_size_kb,
+            )
+
+        logger.info(t("train.export_success", path=output_onnx_path, size=final_size_kb))
         return True
 
     except Exception as exc:
         logger.error(t("train.export_failed", error=str(exc)))
         if temp_onnx.exists():
             temp_onnx.unlink()
+        for ext_f in temp_onnx.parent.glob(f"{temp_onnx.name}*.data*"):
+            try:
+                ext_f.unlink()
+            except OSError:
+                pass
         return False
 
 
@@ -633,7 +766,34 @@ def main():
         default=None,
         help="Path to trained PyTorch weights (.pt) for export [default: output/{model_name}.pt]",
     )
+    parser.add_argument(
+        "--bundle-external-data",
+        type=str,
+        default=None,
+        help="Path to an ONNX model that references external .data files to bundle into a single self-contained .onnx file",
+    )
+    parser.add_argument(
+        "--external-data-file",
+        type=str,
+        default=None,
+        help="Optional path to external .data file if separated from the ONNX file",
+    )
+    parser.add_argument(
+        "--output-onnx",
+        type=str,
+        default=None,
+        help="Optional destination path for bundled single ONNX file",
+    )
     args = parser.parse_args()
+
+    # Fast path: Bundle external data into a single self-contained ONNX file
+    if args.bundle_external_data:
+        success = bundle_external_data_to_single_onnx(
+            onnx_path=Path(args.bundle_external_data),
+            output_path=Path(args.output_onnx) if args.output_onnx else None,
+            data_path=Path(args.external_data_file) if args.external_data_file else None,
+        )
+        sys.exit(0 if success else 1)
 
     cfg_path = Path(args.config).resolve()
     if not cfg_path.exists():

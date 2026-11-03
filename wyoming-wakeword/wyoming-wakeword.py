@@ -463,7 +463,16 @@ class WakeWordEngine:
             else:
                 raise FileNotFoundError(f"Wake word model not found: {m_cfg.model_path}")
 
-        temp_model = self.core.read_model(str(path))
+        try:
+            temp_model = self.core.read_model(str(path))
+        except Exception as exc:
+            err_msg = str(exc)
+            if "externally stored data" in err_msg or ".data" in err_msg:
+                raise RuntimeError(
+                    f"模型 '{m_cfg.name}' ({path}) 加载失败: 该 ONNX 模型的权重保存在外部数据文件 (.data) 中且文件缺失或脱节。"
+                    f"Wyoming 服务需要自包含的单文件 ONNX 模型。请使用 wakeword_trainer 的嵌入导出功能或工具重新打包为单文件 ONNX。"
+                ) from exc
+            raise
         inp = temp_model.inputs[0]
         inp_shape = inp.get_partial_shape()
 
