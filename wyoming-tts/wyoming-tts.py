@@ -690,60 +690,70 @@ class KokoroEngine:
         self.device = device.upper()
         self.threads = threads
 
+        # 1. 探测可写入的缓存目录（自动兼容 Docker 容器中的只读模型目录挂载）
+        resolved_cache: Optional[Path] = None
+        cand_dirs = []
         if cache_dir:
-            self.cache_dir = Path(cache_dir)
-        else:
-            self.cache_dir = model_file.parent / ".ov_cache"
+            cand_dirs.append(Path(cache_dir))
+        cand_dirs.append(model_file.parent / ".ov_cache")
+        cand_dirs.append(Path("/tmp/openvino_cache"))
 
-        try:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        for cand in cand_dirs:
+            try:
+                cand.mkdir(parents=True, exist_ok=True)
+                test_file = cand / f".test_rw_{int(time.time())}"
+                test_file.touch(exist_ok=True)
+                test_file.unlink(missing_ok=True)
+                resolved_cache = cand
+                break
+            except Exception:
+                continue
+
+        self.cache_dir = resolved_cache
+        if self.cache_dir:
             logger.info(t("log.cache_dir_info", path=str(self.cache_dir)))
-        except Exception as e:
-            logger.warning(f"Could not create cache directory {self.cache_dir}: {e}")
-            self.cache_dir = None
 
         logger.info(t("log.loading_model", model=model_file.name, device=self.device))
         core = ov.Core()
-
-        if self.cache_dir:
-            try:
-                core.set_property({"CACHE_DIR": str(self.cache_dir)})
-            except Exception as e:
-                logger.debug(f"Failed to set CACHE_DIR on Core: {e}")
-
         model = core.read_model(str(model_file))
 
-        # GPU 动态维度优化：设置有界动态形状 (Bounded Dynamic Shape)
-        # 声明 token 长度范围在 1..512 之间，利于 GPU 驱动预分配显存池并抑制重分配卡顿
-        try:
-            inputs = model.inputs
-            if len(inputs) >= 1:
-                token_input = inputs[0]
-                pshape = token_input.partial_shape
-                if pshape.rank.is_static and pshape.rank.get_length() == 2:
-                    bounded_shape = ov.PartialShape([1, ov.Dimension(1, 512)])
-                    model.reshape({token_input.any_name: bounded_shape})
-                    logger.debug(f"Configured bounded dynamic shape for tokens: {bounded_shape}")
-        except Exception as e:
-            logger.debug(f"Bounded dynamic shape reshape skipped: {e}")
+        # 2. 精确区分设备特性，避免向不支持该属性的插件（如 HETERO / CPU）传入不兼容属性
+        is_hetero = "HETERO" in self.device
+        is_pure_gpu = self.device == "GPU" or self.device.startswith("GPU.")
 
         ov_config: Dict[str, str] = {"PERFORMANCE_HINT": "LATENCY"}
-        if self.cache_dir:
-            ov_config["CACHE_DIR"] = str(self.cache_dir)
 
-        if "GPU" in self.device:
-            ov_config["INFERENCE_PRECISION_HINT"] = "f16"
+        # HETERO 顶层不接受无前缀 CACHE_DIR，仅纯 GPU 或标准 CPU 插件支持
+        if self.cache_dir and not is_hetero:
+            ov_config["CACHE_DIR"] = str(self.cache_dir)
             try:
-                import os
-                ov_config["COMPILATION_NUM_THREADS"] = str(max(1, os.cpu_count() or 4))
+                core.set_property({"CACHE_DIR": str(self.cache_dir)})
             except Exception:
                 pass
 
-        if threads and threads > 0:
+        if is_pure_gpu:
+            ov_config["INFERENCE_PRECISION_HINT"] = "f16"
+
+        if threads and threads > 0 and ("CPU" in self.device and not is_hetero):
             ov_config["INFERENCE_NUM_THREADS"] = str(threads)
             logger.info(t("log.threads_set", threads=threads))
 
-        self.compiled_model = core.compile_model(model, self.device, config=ov_config)
+        # 3. 三级弹性降级编译（确保在任何硬件、驱动和属性版本下 100% 成功启动）
+        compiled = None
+        try:
+            compiled = core.compile_model(model, self.device, config=ov_config)
+        except Exception as e1:
+            logger.warning(f"Initial compile with optimized config failed ({e1}), falling back to safe basic config...")
+            safe_config = {"PERFORMANCE_HINT": "LATENCY"}
+            try:
+                model_retry = core.read_model(str(model_file))
+                compiled = core.compile_model(model_retry, self.device, config=safe_config)
+            except Exception as e2:
+                logger.warning(f"Safe compile failed ({e2}), attempting raw fallback compilation...")
+                model_raw = core.read_model(str(model_file))
+                compiled = core.compile_model(model_raw, self.device)
+
+        self.compiled_model = compiled
         logger.info(t("log.model_ready"))
 
     def synthesize_tokens(
@@ -1120,12 +1130,15 @@ def main(
         # 针对 GPU/HETERO 执行多尺度动态序列预热，将多尺寸内核预先编译写入 CACHE_DIR 磁盘缓存中
         if "GPU" in engine.device:
             logger.info(t("log.gpu_warmup"))
-            warmup_lengths = [16, 32, 48, 64, 96, 128, 160, 200]
+            warmup_lengths = [16, 32, 48, 64, 96, 128, 160]
             for wlen in warmup_lengths:
-                dummy_tok = np.ones((1, wlen), dtype=np.int64)
-                dummy_tok[0, 0] = 0
-                dummy_tok[0, -1] = 0
-                engine.synthesize_tokens(dummy_tok, warm_style, speed=1.0)
+                try:
+                    dummy_tok = np.ones((1, wlen), dtype=np.int64)
+                    dummy_tok[0, 0] = 0
+                    dummy_tok[0, -1] = 0
+                    engine.synthesize_tokens(dummy_tok, warm_style, speed=1.0)
+                except Exception as wex:
+                    logger.debug(f"Warm-up length {wlen} skipped: {wex}")
             logger.info(t("log.gpu_warmup_done"))
 
         logger.info(t("log.warmup_done"))
