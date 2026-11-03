@@ -680,6 +680,117 @@ def export_npu_optimized_onnx(
         return False
 
 
+def export_tflite_model(
+    model: nn.Module,
+    output_tflite_path: Path,
+    context_length: int = 16,
+    embedding_dim: int = 96,
+    quantize: bool = False,
+) -> bool:
+    """
+    Export wake word classification model to TensorFlow Lite (.tflite) format.
+    Fully compatible with microWakeWord, ESPHome, and Home Assistant.
+    """
+    model.eval()
+    output_tflite_path = Path(output_tflite_path).resolve()
+    output_tflite_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_tflite = output_tflite_path.with_suffix(".tmp.tflite")
+
+    logger.info(t("train.exporting_tflite", path=output_tflite_path.name))
+
+    # 1. Try TensorFlow / Keras backend (most common and reliable)
+    try:
+        import tensorflow as tf
+        import os
+
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+        tf.get_logger().setLevel("ERROR")
+
+        layer_size = model.fc1.out_features
+
+        keras_model = tf.keras.Sequential([
+            tf.keras.layers.Input(shape=(context_length, embedding_dim), batch_size=1, name="input"),
+            tf.keras.layers.Flatten(name="flatten"),
+            tf.keras.layers.Dense(layer_size, activation="relu", name="fc1"),
+            tf.keras.layers.Dense(layer_size, activation="relu", name="fc2"),
+            tf.keras.layers.Dense(1, activation="sigmoid", name="out_fc"),
+        ])
+
+        fc1_w = model.fc1.weight.detach().cpu().numpy().T
+        fc1_b = model.fc1.bias.detach().cpu().numpy()
+        fc2_w = model.fc2.weight.detach().cpu().numpy().T
+        fc2_b = model.fc2.bias.detach().cpu().numpy()
+        out_w = model.out_fc.weight.detach().cpu().numpy().T
+        out_b = model.out_fc.bias.detach().cpu().numpy()
+
+        keras_model.get_layer("fc1").set_weights([fc1_w, fc1_b])
+        keras_model.get_layer("fc2").set_weights([fc2_w, fc2_b])
+        keras_model.get_layer("out_fc").set_weights([out_w, out_b])
+
+        # Verify numerical match against PyTorch
+        test_inp = np.random.randn(1, context_length, embedding_dim).astype(np.float32)
+        with torch.no_grad():
+            py_out = model(torch.from_numpy(test_inp)).cpu().numpy()
+        tf_out = keras_model(test_inp).numpy()
+        np.testing.assert_allclose(py_out, tf_out, rtol=1e-3, atol=1e-4)
+
+        converter = tf.lite.TFLiteConverter.from_keras_model(keras_model)
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+        if quantize:
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+        tflite_bytes = converter.convert()
+        with open(temp_tflite, "wb") as f:
+            f.write(tflite_bytes)
+
+        if output_tflite_path.exists():
+            output_tflite_path.unlink()
+        temp_tflite.rename(output_tflite_path)
+
+        final_size_kb = output_tflite_path.stat().st_size / 1024
+        logger.info(t("train.tflite_export_success", path=output_tflite_path.name, size=final_size_kb))
+        return True
+
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.error(t("train.tflite_export_failed", error=str(exc)))
+        if temp_tflite.exists():
+            temp_tflite.unlink()
+        return False
+
+    # 2. Try LiteRT / ai_edge_torch backend
+    try:
+        try:
+            import litert_torch as edge_torch
+        except ImportError:
+            import ai_edge_torch as edge_torch
+
+        dummy_input = torch.zeros(1, context_length, embedding_dim, dtype=torch.float32)
+        edge_model = edge_torch.convert(model, (dummy_input,))
+        edge_model.export(str(temp_tflite))
+
+        if output_tflite_path.exists():
+            output_tflite_path.unlink()
+        temp_tflite.rename(output_tflite_path)
+
+        final_size_kb = output_tflite_path.stat().st_size / 1024
+        logger.info(t("train.tflite_export_success", path=output_tflite_path.name, size=final_size_kb))
+        return True
+
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.error(t("train.tflite_export_failed", error=str(exc)))
+        if temp_tflite.exists():
+            temp_tflite.unlink()
+        return False
+
+    # 3. No TFLite dependencies found
+    logger.warning(t("train.tflite_dependency_missing"))
+    return False
+
+
 def save_model_artifacts(
     model: nn.Module,
     output_dir: Path,
@@ -688,10 +799,14 @@ def save_model_artifacts(
     context_length: int,
     embedding_dim: int,
     opset: int,
-) -> Tuple[Path, Path, Path]:
-    """Save PyTorch weights (.pt), export static ONNX model, and write metadata JSON."""
+    export_onnx: bool = True,
+    export_tflite: bool = True,
+    quantize: bool = False,
+) -> Tuple[Path, Optional[Path], Optional[Path], Path]:
+    """Save PyTorch weights (.pt), export static ONNX model, and export TFLite model."""
     output_dir.mkdir(parents=True, exist_ok=True)
     final_onnx_path = output_dir / f"{model_name}.onnx"
+    final_tflite_path = output_dir / f"{model_name}.tflite"
     pt_path = output_dir / f"{model_name}.pt"
     info_path = output_dir / f"{model_name}.json"
 
@@ -700,49 +815,63 @@ def save_model_artifacts(
     logger.info("Saved PyTorch weights: %s", pt_path)
 
     # 2. Export NPU static ONNX model
-    export_npu_optimized_onnx(
-        model=model,
-        output_onnx_path=final_onnx_path,
-        context_length=context_length,
-        embedding_dim=embedding_dim,
-        opset=opset,
-    )
+    onnx_ok = False
+    if export_onnx:
+        onnx_ok = export_npu_optimized_onnx(
+            model=model,
+            output_onnx_path=final_onnx_path,
+            context_length=context_length,
+            embedding_dim=embedding_dim,
+            opset=opset,
+        )
 
-    # 3. Write model metadata JSON
+    # 3. Export microWakeWord / ESPHome compatible TFLite model
+    tflite_ok = False
+    if export_tflite:
+        tflite_ok = export_tflite_model(
+            model=model,
+            output_tflite_path=final_tflite_path,
+            context_length=context_length,
+            embedding_dim=embedding_dim,
+            quantize=quantize,
+        )
+
+    # 4. Write model metadata JSON
     phrase = cfg.get("wakeword", {}).get("phrase")
     lang = cfg.get("wakeword", {}).get("language", "zh")
+    metadata = {
+        "model_name": model_name,
+        "model_type": "openWakeWord_DNN_NPU",
+        "onnx_file": f"{model_name}.onnx" if onnx_ok else None,
+        "tflite_file": f"{model_name}.tflite" if tflite_ok else None,
+        "weights_file": f"{model_name}.pt",
+        "phrase": phrase,
+        "language": lang,
+        "context_length": context_length,
+        "embedding_dim": embedding_dim,
+        "recommended_cutoff": 0.55,
+        "recommended_refractory": 2.0,
+        "npu_compatible": True,
+        "input_shape": [1, context_length, embedding_dim],
+        "output_shape": [1, 1],
+    }
     with open(info_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "model_name": model_name,
-                "model_type": "openWakeWord_DNN_NPU",
-                "onnx_file": f"{model_name}.onnx",
-                "weights_file": f"{model_name}.pt",
-                "phrase": phrase,
-                "language": lang,
-                "context_length": context_length,
-                "embedding_dim": embedding_dim,
-                "recommended_cutoff": 0.55,
-                "recommended_refractory": 2.0,
-                "npu_compatible": True,
-                "input_shape": [1, context_length, embedding_dim],
-                "output_shape": [1, 1],
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
 
     print("\n======================================================================")
     print(t("train.congrats_title"))
-    print(f"   - ONNX: {final_onnx_path}")
-    print(f"   - Weights: {pt_path}")
+    if onnx_ok:
+        print(f"   - ONNX (Intel NPU / OpenVINO): {final_onnx_path}")
+    if tflite_ok:
+        print(f"   - TFLite (microWakeWord / ESPHome): {final_tflite_path}")
+    print(f"   - PyTorch Weights: {pt_path}")
     print(f"   - Metadata: {info_path}")
-    print(f"{t('train.wyoming_usage')}")
-    print(f"   python wyoming-wakeword/wyoming-wakeword.py --model {final_onnx_path} --device NPU --cutoff 0.55")
+    if onnx_ok:
+        print(f"{t('train.wyoming_usage')}")
+        print(f"   python wyoming-wakeword/wyoming-wakeword.py --model {final_onnx_path} --device NPU --cutoff 0.55")
     print("======================================================================\n")
 
-    return final_onnx_path, pt_path, info_path
+    return pt_path, final_onnx_path if onnx_ok else None, final_tflite_path if tflite_ok else None, info_path
 
 
 # ==============================================================================
@@ -759,7 +888,29 @@ def main():
     parser.add_argument(
         "--export-only",
         action="store_true",
-        help="Skip data loading and training; directly export ONNX and metadata from existing weights (.pt)",
+        help="Skip data loading and training; directly export models (ONNX & TFLite) and metadata from existing weights (.pt)",
+    )
+    parser.add_argument(
+        "--export-onnx",
+        action="store_true",
+        help="Skip data loading and training; directly export ONNX model (Intel NPU / OpenVINO) from saved weights (.pt)",
+    )
+    parser.add_argument(
+        "--export-tflite",
+        action="store_true",
+        help="Skip data loading and training; directly export TFLite model (microWakeWord / ESPHome) from saved weights (.pt)",
+    )
+    parser.add_argument(
+        "--format",
+        type=str,
+        choices=["all", "onnx", "tflite"],
+        default="all",
+        help="Export format for export mode: 'all' (both ONNX and TFLite), 'onnx', or 'tflite' [default: all]",
+    )
+    parser.add_argument(
+        "--quantize",
+        action="store_true",
+        help="Enable INT8 / dynamic range quantization for TFLite export",
     )
     parser.add_argument(
         "--checkpoint",
@@ -847,11 +998,28 @@ def main():
     # --------------------------------------------------------------------------
     # Fast path: Export-only mode (skip data loading and training)
     # --------------------------------------------------------------------------
-    if args.export_only:
+    is_export_mode = args.export_only or args.export_onnx or args.export_tflite
+    if is_export_mode:
         ckpt_path = Path(args.checkpoint).resolve() if args.checkpoint else output_dir / f"{model_name}.pt"
         if not ckpt_path.exists():
-            logger.error("Checkpoint file not found: %s. Cannot perform --export-only without saved weights (.pt).", ckpt_path)
+            logger.error("Checkpoint file not found: %s. Cannot perform export without saved weights (.pt).", ckpt_path)
             sys.exit(1)
+
+        do_onnx = True
+        do_tflite = True
+
+        if args.export_tflite and not args.export_onnx and not args.export_only:
+            do_onnx = False
+            do_tflite = True
+        elif args.export_onnx and not args.export_tflite and not args.export_only:
+            do_onnx = True
+            do_tflite = False
+        elif args.format == "onnx":
+            do_onnx = True
+            do_tflite = False
+        elif args.format == "tflite":
+            do_onnx = False
+            do_tflite = True
 
         logger.info("Loading weights from %s ...", ckpt_path)
         model = NPUOptimizedWakeWordDNN(
@@ -871,6 +1039,9 @@ def main():
             context_length=context_length,
             embedding_dim=embedding_dim,
             opset=opset,
+            export_onnx=do_onnx,
+            export_tflite=do_tflite,
+            quantize=args.quantize,
         )
         return
 
@@ -998,7 +1169,7 @@ def main():
     elapsed = time.time() - start_time
     logger.info(t("train.training_complete", elapsed=elapsed))
 
-    # 7. Save weights, export NPU static ONNX model, and write metadata
+    # 7. Save weights, export NPU static ONNX model & microWakeWord TFLite model, and write metadata
     save_model_artifacts(
         model=model,
         output_dir=output_dir,
@@ -1007,6 +1178,9 @@ def main():
         context_length=context_length,
         embedding_dim=embedding_dim,
         opset=opset,
+        export_onnx=True,
+        export_tflite=True,
+        quantize=args.quantize,
     )
 
 
