@@ -546,6 +546,71 @@ def export_npu_optimized_onnx(
         return False
 
 
+def save_model_artifacts(
+    model: nn.Module,
+    output_dir: Path,
+    model_name: str,
+    cfg: dict,
+    context_length: int,
+    embedding_dim: int,
+    opset: int,
+) -> Tuple[Path, Path, Path]:
+    """Save PyTorch weights (.pt), export static ONNX model, and write metadata JSON."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_onnx_path = output_dir / f"{model_name}.onnx"
+    pt_path = output_dir / f"{model_name}.pt"
+    info_path = output_dir / f"{model_name}.json"
+
+    # 1. Save PyTorch weights (.pt) for subsequent fast re-export or fine-tuning
+    torch.save(model.state_dict(), str(pt_path))
+    logger.info("Saved PyTorch weights: %s", pt_path)
+
+    # 2. Export NPU static ONNX model
+    export_npu_optimized_onnx(
+        model=model,
+        output_onnx_path=final_onnx_path,
+        context_length=context_length,
+        embedding_dim=embedding_dim,
+        opset=opset,
+    )
+
+    # 3. Write model metadata JSON
+    phrase = cfg.get("wakeword", {}).get("phrase")
+    lang = cfg.get("wakeword", {}).get("language", "zh")
+    with open(info_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "model_name": model_name,
+                "model_type": "openWakeWord_DNN_NPU",
+                "onnx_file": f"{model_name}.onnx",
+                "weights_file": f"{model_name}.pt",
+                "phrase": phrase,
+                "language": lang,
+                "context_length": context_length,
+                "embedding_dim": embedding_dim,
+                "recommended_cutoff": 0.55,
+                "recommended_refractory": 2.0,
+                "npu_compatible": True,
+                "input_shape": [1, context_length, embedding_dim],
+                "output_shape": [1, 1],
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    print("\n======================================================================")
+    print(t("train.congrats_title"))
+    print(f"   - ONNX: {final_onnx_path}")
+    print(f"   - Weights: {pt_path}")
+    print(f"   - Metadata: {info_path}")
+    print(f"{t('train.wyoming_usage')}")
+    print(f"   python wyoming-wakeword/wyoming-wakeword.py --model {final_onnx_path} --device NPU --cutoff 0.55")
+    print("======================================================================\n")
+
+    return final_onnx_path, pt_path, info_path
+
+
 # ==============================================================================
 # Main Training Function
 # ==============================================================================
@@ -557,6 +622,17 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument("--device", default=None, help="PyTorch training device (auto, cpu, cuda, xpu)")
     parser.add_argument("--feature-device", default=None, help="Feature extraction device (auto, CPU, GPU)")
+    parser.add_argument(
+        "--export-only",
+        action="store_true",
+        help="Skip data loading and training; directly export ONNX and metadata from existing weights (.pt)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to trained PyTorch weights (.pt) for export [default: output/{model_name}.pt]",
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config).resolve()
@@ -606,6 +682,36 @@ def main():
     print(t("train.training_device", device=str(train_device).upper()))
     print(t("train.output_path", path=final_onnx_path))
     print("======================================================================")
+
+    # --------------------------------------------------------------------------
+    # Fast path: Export-only mode (skip data loading and training)
+    # --------------------------------------------------------------------------
+    if args.export_only:
+        ckpt_path = Path(args.checkpoint).resolve() if args.checkpoint else output_dir / f"{model_name}.pt"
+        if not ckpt_path.exists():
+            logger.error("Checkpoint file not found: %s. Cannot perform --export-only without saved weights (.pt).", ckpt_path)
+            sys.exit(1)
+
+        logger.info("Loading weights from %s ...", ckpt_path)
+        model = NPUOptimizedWakeWordDNN(
+            context_length=context_length,
+            embedding_dim=embedding_dim,
+            layer_size=layer_size,
+            dropout=0.0,
+        )
+        state_dict = torch.load(str(ckpt_path), map_location="cpu")
+        model.load_state_dict(state_dict)
+
+        save_model_artifacts(
+            model=model,
+            output_dir=output_dir,
+            model_name=model_name,
+            cfg=cfg,
+            context_length=context_length,
+            embedding_dim=embedding_dim,
+            opset=opset,
+        )
+        return
 
     # 1. Initialize feature extractor
     models_dir = (base_dir / "lib" / "models").resolve()
@@ -731,45 +837,16 @@ def main():
     elapsed = time.time() - start_time
     logger.info(t("train.training_complete", elapsed=elapsed))
 
-    # 7. Export NPU static ONNX model
-    export_npu_optimized_onnx(
+    # 7. Save weights, export NPU static ONNX model, and write metadata
+    save_model_artifacts(
         model=model,
-        output_onnx_path=final_onnx_path,
+        output_dir=output_dir,
+        model_name=model_name,
+        cfg=cfg,
         context_length=context_length,
         embedding_dim=embedding_dim,
         opset=opset,
     )
-
-    # 8. Write model metadata JSON
-    info_path = output_dir / f"{model_name}.json"
-    with open(info_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "model_name": model_name,
-                "model_type": "openWakeWord_DNN_NPU",
-                "onnx_file": f"{model_name}.onnx",
-                "phrase": cfg["wakeword"].get("phrase"),
-                "language": cfg["wakeword"].get("language"),
-                "context_length": context_length,
-                "embedding_dim": embedding_dim,
-                "recommended_cutoff": 0.55,
-                "recommended_refractory": 2.0,
-                "npu_compatible": True,
-                "input_shape": [1, context_length, embedding_dim],
-                "output_shape": [1, 1],
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    print("\n======================================================================")
-    print(t("train.congrats_title"))
-    print(f"   - ONNX: {final_onnx_path}")
-    print(f"   - Metadata: {info_path}")
-    print(f"{t('train.wyoming_usage')}")
-    print(f"   python wyoming-wakeword/wyoming-wakeword.py --model {final_onnx_path} --device NPU --cutoff 0.55")
-    print("======================================================================\n")
 
 
 if __name__ == "__main__":

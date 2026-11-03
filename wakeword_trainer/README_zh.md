@@ -136,7 +136,12 @@ python run_pipeline.py --quick-mode
    python train.py --config config.yaml --steps 20000 --batch-size 128
    ```
 
-最终模型将输出至 `output/{friend_name}.onnx`，并附带 `{friend_name}.json` 元信息文件。
+6. **仅从已有权重导出 ONNX 模型 (无需重新训练)**:
+   ```bash
+   python train.py --config config.yaml --export-only
+   ```
+
+最终模型将输出至 `output/{friend_name}.onnx`，PyTorch 权重保存至 `output/{friend_name}.pt`，并附带 `{friend_name}.json` 元信息文件。
 
 ---
 

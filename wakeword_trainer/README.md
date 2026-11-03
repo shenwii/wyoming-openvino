@@ -138,8 +138,12 @@ python run_pipeline.py --quick-mode
    ```bash
    python train.py --config config.yaml --steps 20000 --batch-size 128
    ```
+6. **Export-only from trained weights (no re-training needed)**:
+   ```bash
+   python train.py --config config.yaml --export-only
+   ```
 
-Outputs are saved in `output/{friend_name}.onnx` and `output/{friend_name}.json`.
+Outputs are saved in `output/{friend_name}.onnx`, `output/{friend_name}.pt`, and `output/{friend_name}.json`.
 
 ---
 

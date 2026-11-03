@@ -16,6 +16,7 @@ numpy>=1.24.0
 # ONNX 模型构建、优化与推理验证
 onnx>=1.14.0
 onnxruntime>=1.15.0
+onnxscript>=0.1.0
 
 # Intel OpenVINO 推理引擎 (可选，用于本地 OpenVINO TTS 与 NPU 兼容性测试)
 openvino>=2024.0.0
