@@ -518,7 +518,8 @@ def bundle_external_data_to_single_onnx(
 
         has_external = False
         for init in model.graph.initializer:
-            if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+            is_ext = getattr(init, "data_location", 0) == onnx.TensorProto.EXTERNAL or bool(getattr(init, "external_data", []))
+            if is_ext:
                 has_external = True
                 for entry in init.external_data:
                     if entry.key == "location":
@@ -546,7 +547,7 @@ def bundle_external_data_to_single_onnx(
         verified_model = onnx.load(str(temp_out), load_external_data=False)
         onnx.checker.check_model(verified_model)
         for init in verified_model.graph.initializer:
-            if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+            if getattr(init, "data_location", 0) == onnx.TensorProto.EXTERNAL or bool(getattr(init, "external_data", [])):
                 raise RuntimeError(f"Initializer '{init.name}' still references external data.")
 
         if out_file.exists():
@@ -628,7 +629,7 @@ def export_npu_optimized_onnx(
             onnx_model = onnx.load(str(temp_onnx), load_external_data=False)
             onnx.checker.check_model(onnx_model)
             for init in onnx_model.graph.initializer:
-                if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+                if getattr(init, "data_location", 0) == onnx.TensorProto.EXTERNAL or bool(getattr(init, "external_data", [])):
                     raise RuntimeError(
                         f"ONNX model still references external data for '{init.name}'. "
                         "All weights must be embedded into the single .onnx file."

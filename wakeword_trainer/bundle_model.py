@@ -51,7 +51,7 @@ def bundle_onnx_external_data(
         # Check for external data references
         external_entries = []
         for init in model.graph.initializer:
-            if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+            if getattr(init, "data_location", 0) == onnx.TensorProto.EXTERNAL or bool(getattr(init, "external_data", [])):
                 external_entries.append(init)
 
         if not external_entries:
@@ -89,7 +89,7 @@ def bundle_onnx_external_data(
         verified = onnx.load(str(temp_out), load_external_data=False)
         onnx.checker.check_model(verified)
         for init in verified.graph.initializer:
-            if init.has_field("data_location") and init.data_location == onnx.TensorProto.EXTERNAL:
+            if getattr(init, "data_location", 0) == onnx.TensorProto.EXTERNAL or bool(getattr(init, "external_data", [])):
                 raise RuntimeError(f"Initializer '{init.name}' still references external data after conversion!")
 
         if out_file.exists():
@@ -219,6 +219,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Bundle ONNX external weights or re-export PyTorch weights into a single self-contained ONNX model."
     )
+    parser.add_argument("input_file", nargs="?", default=None, help="Input model file (.pt or .onnx)")
     parser.add_argument("--onnx", type=str, default=None, help="Path to input ONNX model file")
     parser.add_argument("--data", type=str, default=None, help="Path to external .data file (optional)")
     parser.add_argument("--pt", type=str, default=None, help="Path to PyTorch checkpoint (.pt) for fast re-export")
@@ -227,6 +228,13 @@ def main():
     parser.add_argument("--embedding-dim", type=int, default=96, help="Embedding dimension [default: 96]")
     parser.add_argument("--layer-size", type=int, default=64, help="Hidden layer size [default: 64]")
     args = parser.parse_args()
+
+    # Automatically resolve positional argument if provided
+    if args.input_file:
+        if args.input_file.endswith(".pt") and not args.pt:
+            args.pt = args.input_file
+        elif (args.input_file.endswith(".onnx") or args.input_file.endswith(".onnx.data")) and not args.onnx:
+            args.onnx = args.input_file
 
     if args.pt:
         out_path = Path(args.output or Path(args.pt).with_suffix(".onnx"))
