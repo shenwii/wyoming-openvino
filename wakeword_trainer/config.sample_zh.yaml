@@ -65,7 +65,7 @@ tts:
   kokoro:
     enabled: true
     # 模型路径 (若未指定，脚本将自动在父目录或模型目录中查找)
-    model_dir: "../Kokoro-82M-FP16-OpenVINO"
+    model_dir: "../Kokoro-82M-int8-ov"
     # 推理设备: CPU (推荐，速度快且稳定) 或 GPU (Intel GPU)
     device: "CPU"
     # 语速变化范围 [min, max]，生成时将在此区间均匀随机采样，提升泛化力
@@ -103,9 +103,9 @@ data:
 
   # 数据集下载地址 (支持断点续传与本地缓存检测)
   downloads:
-    # 1. MIT 房间冲激响应数据集 (MIT Environmental Impulse Responses, ~120MB)
+    # 1. MIT 房间冲激响应数据集 (MIT Environmental Impulse Responses, ~140MB)
     # 用于模拟客厅、卧室、办公室等不同房间尺寸与反射条件下的真实混响
-    mit_rirs_url: "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses/resolve/main/mit_rirs.zip"
+    mit_rirs_url: "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
 
     # 2. 背景环境噪声数据集 (AudioSet 16kHz 背景音频 / ESC-50 环境音)
     # 包含风扇、电视、家电、交谈背景音等日常生活背景声

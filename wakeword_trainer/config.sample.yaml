@@ -59,7 +59,7 @@ tts:
   kokoro:
     enabled: true
     # Model directory (auto-searched in parent directories if left empty or relative)
-    model_dir: "../Kokoro-82M-FP16-OpenVINO"
+    model_dir: "../Kokoro-82M-int8-ov"
     # Inference device: CPU (recommended for speed and stability) or GPU (Intel GPU)
     device: "CPU"
     # Speed perturbation range [min, max] for acoustic generalization
@@ -97,9 +97,9 @@ data:
 
   # Dataset download URLs (supports resume and local caching)
   downloads:
-    # 1. MIT Environmental Impulse Responses (~120MB)
+    # 1. MIT Environmental Impulse Responses (~140MB)
     # Simulates real room acoustics and reverberation for various room sizes
-    mit_rirs_url: "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses/resolve/main/mit_rirs.zip"
+    mit_rirs_url: "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
 
     # 2. Ambient background noise dataset (ESC-50 / AudioSet)
     # Includes fans, appliances, speech murmur, household background sounds

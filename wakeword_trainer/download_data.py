@@ -43,7 +43,7 @@ def download_with_resume(url: str, dest_path: Path) -> bool:
     if temp_path.exists():
         initial_size = temp_path.stat().st_size
 
-    headers = {"User-Agent": "Wyoming-Wakeword-Trainer/1.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     if initial_size > 0:
         headers["Range"] = f"bytes={initial_size}-"
         logger.info(t("download.resume_detected", name=dest_path.name, size=initial_size))
@@ -93,6 +93,44 @@ def download_with_resume(url: str, dest_path: Path) -> bool:
         return False
 
 
+def generate_synthetic_rirs(rirs_dir: Path, count: int = 30, sample_rate: int = 16000) -> None:
+    """Generate simulated room impulse responses (RIRs) as an acoustic fallback."""
+    rirs_dir.mkdir(parents=True, exist_ok=True)
+    import random
+    import wave
+    import numpy as np
+
+    logger.info("Generating %d simulated room impulse responses (RIRs)...", count)
+    for i in range(count):
+        rt60 = random.uniform(0.15, 0.75)
+        duration = min(1.0, rt60 * 1.2)
+        n_samples = int(duration * sample_rate)
+        t = np.linspace(0, duration, n_samples, endpoint=False)
+
+        decay = np.exp(-6.91 * t / rt60)
+        noise = np.random.randn(n_samples)
+        rir = noise * decay
+        rir[0] = 1.0  # Direct path arrival
+
+        num_reflections = random.randint(6, 16)
+        for _ in range(num_reflections):
+            ref_idx = random.randint(int(0.005 * sample_rate), int(0.08 * sample_rate))
+            if ref_idx < n_samples:
+                ref_amp = random.uniform(-0.6, 0.6) * np.exp(-6.91 * (ref_idx / sample_rate) / rt60)
+                rir[ref_idx] += ref_amp
+
+        max_val = np.max(np.abs(rir)) + 1e-9
+        rir = (rir / max_val * 0.95 * 32767.0).astype(np.int16)
+
+        out_path = rirs_dir / f"simulated_rir_{i:03d}.wav"
+        with wave.open(str(out_path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(rir.tobytes())
+    logger.info("✅ Successfully generated %d simulated RIR files in %s", count, rirs_dir)
+
+
 def extract_zip(archive_path: Path, extract_to: Path) -> bool:
     """Extract a ZIP archive into specified destination directory."""
     logger.info(t("download.extracting", name=archive_path.name, dest=extract_to))
@@ -137,9 +175,45 @@ def main():
         rirs_dir = data_dir / "mit_rirs"
         rirs_zip = data_dir / "mit_rirs.zip"
         if not rirs_dir.exists() or len(list(rirs_dir.glob("**/*.wav"))) == 0:
-            ok = download_with_resume(downloads_cfg["mit_rirs_url"], rirs_zip)
-            if ok and rirs_zip.exists():
-                extract_zip(rirs_zip, rirs_dir)
+            primary_url = downloads_cfg.get("mit_rirs_url", "")
+            # Candidate URLs with automatic fallbacks
+            candidate_urls = []
+            if primary_url and "huggingface.co" not in primary_url:
+                candidate_urls.append(primary_url)
+            # Official MIT McDermott Lab direct link
+            candidate_urls.append("https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip")
+            if primary_url and primary_url not in candidate_urls:
+                candidate_urls.append(primary_url)
+
+            ok = False
+            for url in candidate_urls:
+                logger.info("Attempting RIR download from: %s", url)
+                if download_with_resume(url, rirs_zip):
+                    if rirs_zip.exists() and extract_zip(rirs_zip, rirs_dir):
+                        if len(list(rirs_dir.glob("**/*.wav"))) > 0:
+                            ok = True
+                            break
+
+            # If HTTP zip download failed, try Hugging Face git clone
+            if not ok or len(list(rirs_dir.glob("**/*.wav"))) == 0:
+                logger.info("Attempting Hugging Face git clone for MIT RIRs...")
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["git", "clone", "--depth", "1", "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses", str(rirs_dir / "hf_rirs")],
+                        check=True,
+                        capture_output=True,
+                    )
+                    if len(list(rirs_dir.glob("**/*.wav"))) > 0:
+                        ok = True
+                        logger.info("Successfully fetched RIRs via Hugging Face repository clone.")
+                except Exception as e:
+                    logger.debug("Git clone fallback failed: %s", e)
+
+            # If all external sources fail, generate simulated RIRs as local fallback
+            if len(list(rirs_dir.glob("**/*.wav"))) == 0:
+                logger.warning("Could not download RIR dataset; generating simulated room impulse responses as local fallback...")
+                generate_synthetic_rirs(rirs_dir, count=30)
         else:
             logger.info(t("setup.already_exists", path=rirs_dir))
 

@@ -58,7 +58,7 @@ tts:
   kokoro:
     enabled: true
     # モデルディレクトリ (親ディレクトリから自動探索)
-    model_dir: "../Kokoro-82M-FP16-OpenVINO"
+    model_dir: "../Kokoro-82M-int8-ov"
     # 推論デバイス: CPU (推奨、高速かつ安定) または GPU (Intel GPU)
     device: "CPU"
     # 話速の摂動範囲 [min, max]
@@ -86,8 +86,8 @@ data:
   data_dir: "./data"
 
   downloads:
-    # 1. MIT 室内インパルス応答データセット (MIT RIR, ~120MB)
-    mit_rirs_url: "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses/resolve/main/mit_rirs.zip"
+    # 1. MIT 室内インパルス応答データセット (MIT RIR, ~140MB)
+    mit_rirs_url: "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
 
     # 2. 環境背景ノイズデータセット (ESC-50 / AudioSet)
     noise_dataset_url: "https://github.com/karolpiczak/ESC-50/archive/master.zip"

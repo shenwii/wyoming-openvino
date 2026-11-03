@@ -251,9 +251,11 @@ class WakeWordDataset(Dataset):
         negative_features: List[np.ndarray],
         acav_mmap: Optional[np.ndarray] = None,
         context_len: int = 16,
+        embedding_dim: int = 96,
         samples_per_epoch: int = 50000,
     ) -> None:
         self.context_len = context_len
+        self.embedding_dim = embedding_dim
         self.samples_per_epoch = samples_per_epoch
 
         self.pos_windows = []
@@ -262,15 +264,23 @@ class WakeWordDataset(Dataset):
                 self.pos_windows.append(feat[-context_len:])
                 if len(feat) >= context_len + 1:
                     self.pos_windows.append(feat[-(context_len + 1) : -1])
+            elif len(feat) > 0:
+                pad_len = context_len - len(feat)
+                padded = np.pad(feat, ((pad_len, 0), (0, 0)), mode="constant", constant_values=0.0)
+                self.pos_windows.append(padded)
 
         self.neg_windows = []
         for feat in negative_features:
             if len(feat) >= context_len:
                 for i in range(len(feat) - context_len + 1):
                     self.neg_windows.append(feat[i : i + context_len])
+            elif len(feat) > 0:
+                pad_len = context_len - len(feat)
+                padded = np.pad(feat, ((pad_len, 0), (0, 0)), mode="constant", constant_values=0.0)
+                self.neg_windows.append(padded)
 
         self.acav_mmap = acav_mmap
-        self.has_acav = acav_mmap is not None and len(acav_mmap) > context_len
+        self.has_acav = acav_mmap is not None and len(acav_mmap) > 0
 
         logger.info(
             t(
@@ -284,22 +294,76 @@ class WakeWordDataset(Dataset):
     def __len__(self) -> int:
         return self.samples_per_epoch
 
+    def _sample_acav_window(self) -> np.ndarray:
+        """Sample a window guaranteed to be shape (context_len, embedding_dim) from ACAV100M mmap."""
+        n_samples = len(self.acav_mmap)
+        idx = random.randint(0, n_samples - 1)
+        raw = self.acav_mmap[idx]
+
+        # Case 1: 3D array (N, context_len, embedding_dim), e.g. (5625000, 16, 96)
+        if self.acav_mmap.ndim == 3:
+            t_len = raw.shape[0]
+            if t_len == self.context_len:
+                window = raw
+            elif t_len > self.context_len:
+                offset = random.randint(0, t_len - self.context_len)
+                window = raw[offset : offset + self.context_len]
+            else:
+                pad_len = self.context_len - t_len
+                window = np.pad(raw, ((pad_len, 0), (0, 0)), mode="constant", constant_values=0.0)
+
+        # Case 2: 2D array (N, D)
+        elif self.acav_mmap.ndim == 2:
+            if self.acav_mmap.shape[1] == self.embedding_dim:
+                # Continuous frames along axis 0
+                max_start = max(0, n_samples - self.context_len - 1)
+                start = random.randint(0, max_start)
+                window = self.acav_mmap[start : start + self.context_len]
+                if len(window) < self.context_len:
+                    window = np.pad(window, ((self.context_len - len(window), 0), (0, 0)), mode="constant")
+            elif self.acav_mmap.shape[1] == self.context_len * self.embedding_dim:
+                window = raw.reshape(self.context_len, self.embedding_dim)
+            else:
+                window = raw.reshape(self.context_len, -1)[:, : self.embedding_dim]
+        else:
+            window = raw.reshape(self.context_len, self.embedding_dim)
+
+        window = np.ascontiguousarray(window)
+        if window.dtype == np.int16:
+            window = window.astype(np.float32) / 32768.0
+        elif window.dtype != np.float32:
+            window = window.astype(np.float32)
+
+        if window.shape != (self.context_len, self.embedding_dim):
+            window = window.reshape(self.context_len, self.embedding_dim)
+
+        return window
+
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         if random.random() < 0.5 and len(self.pos_windows) > 0:
             window = random.choice(self.pos_windows)
             label = 1.0
         else:
             if self.has_acav and (len(self.neg_windows) == 0 or random.random() < 0.6):
-                max_start = len(self.acav_mmap) - self.context_len - 1
-                start = random.randint(0, max_start)
-                window = self.acav_mmap[start : start + self.context_len]
-                if window.dtype == np.int16:
-                    window = window.astype(np.float32) / 32768.0
-            else:
+                window = self._sample_acav_window()
+            elif len(self.neg_windows) > 0:
                 window = random.choice(self.neg_windows)
+            elif self.has_acav:
+                window = self._sample_acav_window()
+            else:
+                window = np.random.randn(self.context_len, self.embedding_dim).astype(np.float32) * 0.05
             label = 0.0
 
-        return torch.from_numpy(window.copy()).float(), torch.tensor([label], dtype=torch.float32)
+        window = np.ascontiguousarray(window)
+        if window.dtype == np.int16:
+            window = window.astype(np.float32) / 32768.0
+        elif window.dtype != np.float32:
+            window = window.astype(np.float32)
+
+        if window.shape != (self.context_len, self.embedding_dim):
+            window = window.reshape(self.context_len, self.embedding_dim)
+
+        return torch.from_numpy(window).float(), torch.tensor([label], dtype=torch.float32)
 
 
 # ==============================================================================
@@ -351,6 +415,7 @@ def evaluate_model(
     val_pos_features: List[np.ndarray],
     val_neg_mmap: Optional[np.ndarray],
     context_len: int = 16,
+    embedding_dim: int = 96,
     cutoff: float = 0.5,
 ) -> Tuple[float, float]:
     """Evaluate recall and estimated False Alarms Per Hour (FAPH)."""
@@ -362,33 +427,62 @@ def evaluate_model(
     with torch.no_grad():
         for feat in val_pos_features:
             if len(feat) >= context_len:
-                win = torch.from_numpy(feat[-context_len:]).unsqueeze(0).to(device)
-                pred = model(win).item()
-                if pred >= cutoff:
-                    pos_correct += 1
-                pos_total += 1
+                win_np = feat[-context_len:]
+            elif len(feat) > 0:
+                win_np = np.pad(feat, ((context_len - len(feat), 0), (0, 0)), mode="constant")
+            else:
+                continue
+
+            if win_np.shape != (context_len, embedding_dim):
+                win_np = win_np.reshape(context_len, embedding_dim)
+
+            win = torch.from_numpy(np.ascontiguousarray(win_np, dtype=np.float32)).unsqueeze(0).to(device)
+            pred = model(win).item()
+            if pred >= cutoff:
+                pos_correct += 1
+            pos_total += 1
 
     recall = (pos_correct / pos_total) if pos_total > 0 else 0.0
 
     false_positives = 0
     total_hours = 0.0
 
-    if val_neg_mmap is not None and len(val_neg_mmap) > context_len:
-        total_frames = len(val_neg_mmap)
-        total_hours = (total_frames * 0.08) / 3600.0
+    if val_neg_mmap is not None and len(val_neg_mmap) > 0:
+        if val_neg_mmap.ndim == 3:
+            total_windows = len(val_neg_mmap)
+            total_hours = (total_windows * 0.08) / 3600.0
+            stride = 4
+            with torch.no_grad():
+                for i in range(0, total_windows, stride):
+                    win_np = val_neg_mmap[i]
+                    if win_np.dtype == np.int16:
+                        win_np = win_np.astype(np.float32) / 32768.0
+                    if win_np.shape != (context_len, embedding_dim):
+                        win_np = win_np.reshape(context_len, embedding_dim)
+                    win = torch.from_numpy(np.ascontiguousarray(win_np, dtype=np.float32)).unsqueeze(0).to(device)
+                    pred = model(win).item()
+                    if pred >= cutoff:
+                        false_positives += 1
+            faph = (false_positives * stride) / total_hours if total_hours > 0 else 0.0
 
-        stride = 4
-        with torch.no_grad():
-            for i in range(0, total_frames - context_len, stride):
-                win_np = val_neg_mmap[i : i + context_len]
-                if win_np.dtype == np.int16:
-                    win_np = win_np.astype(np.float32) / 32768.0
-                win = torch.from_numpy(win_np).unsqueeze(0).to(device)
-                pred = model(win).item()
-                if pred >= cutoff:
-                    false_positives += 1
-
-        faph = (false_positives * stride) / total_hours if total_hours > 0 else 0.0
+        elif val_neg_mmap.ndim == 2 and len(val_neg_mmap) > context_len:
+            total_frames = len(val_neg_mmap)
+            total_hours = (total_frames * 0.08) / 3600.0
+            stride = 4
+            with torch.no_grad():
+                for i in range(0, total_frames - context_len, stride):
+                    win_np = val_neg_mmap[i : i + context_len]
+                    if win_np.dtype == np.int16:
+                        win_np = win_np.astype(np.float32) / 32768.0
+                    if win_np.shape != (context_len, embedding_dim):
+                        win_np = win_np.reshape(context_len, embedding_dim)
+                    win = torch.from_numpy(np.ascontiguousarray(win_np, dtype=np.float32)).unsqueeze(0).to(device)
+                    pred = model(win).item()
+                    if pred >= cutoff:
+                        false_positives += 1
+            faph = (false_positives * stride) / total_hours if total_hours > 0 else 0.0
+        else:
+            faph = 0.0
     else:
         faph = 0.0
 
@@ -540,6 +634,7 @@ def main():
             logger.info(t("train.acav_loading", name=acav_path.name))
             acav_mmap = np.load(str(acav_path), mmap_mode="r")
             logger.info(t("train.acav_mapped", count=len(acav_mmap)))
+            logger.info("  -> ACAV100M array shape: %s, dtype: %s", acav_mmap.shape, acav_mmap.dtype)
         except Exception as e:
             logger.warning(t("train.acav_failed", error=str(e)))
 
@@ -550,6 +645,7 @@ def main():
         try:
             val_mmap = np.load(str(val_path), mmap_mode="r")
             logger.info(t("train.validation_loaded", count=len(val_mmap)))
+            logger.info("  -> Validation array shape: %s, dtype: %s", val_mmap.shape, val_mmap.dtype)
         except Exception:
             pass
 
@@ -559,6 +655,7 @@ def main():
         negative_features=neg_features,
         acav_mmap=acav_mmap,
         context_len=context_length,
+        embedding_dim=embedding_dim,
         samples_per_epoch=steps * batch_size,
     )
 
@@ -619,7 +716,14 @@ def main():
             )
 
         if step % 2000 == 0 or step == steps:
-            recall, faph = evaluate_model(model, pos_features, val_mmap, context_len=context_length, cutoff=0.5)
+            recall, faph = evaluate_model(
+                model,
+                pos_features,
+                val_mmap,
+                context_len=context_length,
+                embedding_dim=embedding_dim,
+                cutoff=0.5,
+            )
             print(f"\n  {t('train.val_stats', step=step, recall=recall * 100, faph=faph)}")
             model.train()
 

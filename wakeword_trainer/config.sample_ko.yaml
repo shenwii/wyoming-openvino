@@ -56,7 +56,7 @@ tts:
   # ----------------------------------------------------------------------------
   kokoro:
     enabled: true
-    model_dir: "../Kokoro-82M-FP16-OpenVINO"
+    model_dir: "../Kokoro-82M-int8-ov"
     device: "CPU"
     speed_range: [0.75, 1.25]
     voices: []
@@ -80,8 +80,8 @@ data:
   data_dir: "./data"
 
   downloads:
-    # 1. MIT 실내 충격 응답 데이터셋 (MIT RIR, ~120MB)
-    mit_rirs_url: "https://huggingface.co/datasets/davidscripka/MIT_environmental_impulse_responses/resolve/main/mit_rirs.zip"
+    # 1. MIT 실내 충격 응답 데이터셋 (MIT RIR, ~140MB)
+    mit_rirs_url: "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
 
     # 2. 배경 환경 소음 데이터셋 (ESC-50 / AudioSet)
     noise_dataset_url: "https://github.com/karolpiczak/ESC-50/archive/master.zip"
