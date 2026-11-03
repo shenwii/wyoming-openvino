@@ -436,7 +436,7 @@ def evaluate_model(
             if win_np.shape != (context_len, embedding_dim):
                 win_np = win_np.reshape(context_len, embedding_dim)
 
-            win = torch.from_numpy(np.ascontiguousarray(win_np, dtype=np.float32)).unsqueeze(0).to(device)
+            win = torch.from_numpy(np.array(win_np, dtype=np.float32, copy=True)).unsqueeze(0).to(device)
             pred = model(win).item()
             if pred >= cutoff:
                 pos_correct += 1
@@ -459,7 +459,7 @@ def evaluate_model(
                         win_np = win_np.astype(np.float32) / 32768.0
                     if win_np.shape != (context_len, embedding_dim):
                         win_np = win_np.reshape(context_len, embedding_dim)
-                    win = torch.from_numpy(np.ascontiguousarray(win_np, dtype=np.float32)).unsqueeze(0).to(device)
+                    win = torch.from_numpy(np.array(win_np, dtype=np.float32, copy=True)).unsqueeze(0).to(device)
                     pred = model(win).item()
                     if pred >= cutoff:
                         false_positives += 1
@@ -476,7 +476,7 @@ def evaluate_model(
                         win_np = win_np.astype(np.float32) / 32768.0
                     if win_np.shape != (context_len, embedding_dim):
                         win_np = win_np.reshape(context_len, embedding_dim)
-                    win = torch.from_numpy(np.ascontiguousarray(win_np, dtype=np.float32)).unsqueeze(0).to(device)
+                    win = torch.from_numpy(np.array(win_np, dtype=np.float32, copy=True)).unsqueeze(0).to(device)
                     pred = model(win).item()
                     if pred >= cutoff:
                         false_positives += 1
