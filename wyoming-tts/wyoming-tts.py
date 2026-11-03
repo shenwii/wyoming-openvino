@@ -674,6 +674,60 @@ def resolve_model_and_voices(
 
 
 # ===========================================================================
+# Shape Bucketing & Audio Trimming Helpers (for GPU JIT Optimization)
+# ===========================================================================
+DEFAULT_BUCKET_SIZES: List[int] = [64, 128, 192, 256, 384, 512]
+
+
+def find_bucket_size(token_len: int, bucket_sizes: List[int]) -> int:
+    """Find the smallest bucket size >= token_len, capped at maximum bucket."""
+    for b in bucket_sizes:
+        if token_len <= b:
+            return b
+    return min(token_len, 512)
+
+
+def trim_trailing_silence(
+    audio: np.ndarray,
+    sample_rate: int = 24000,
+    threshold: float = 0.015,
+    min_keep_seconds: float = 0.5,
+    margin_seconds: float = 0.1,
+) -> np.ndarray:
+    """
+    Trim trailing silence from generated audio caused by token padding.
+    - threshold: amplitude threshold below which is considered silence (0.015 ~ -36dB)
+    - min_keep_seconds: minimum audio duration to retain
+    - margin_seconds: comfort natural acoustic decay buffer to retain at the end (100ms)
+    """
+    if len(audio) == 0:
+        return audio
+
+    min_samples = int(min_keep_seconds * sample_rate)
+    if len(audio) <= min_samples:
+        return audio
+
+    margin_samples = int(margin_seconds * sample_rate)
+    frame_size = 512
+    abs_audio = np.abs(audio)
+
+    start_pos = len(audio) - (len(audio) % frame_size)
+    if start_pos >= len(audio):
+        start_pos -= frame_size
+
+    last_active_idx = len(audio)
+    for idx in range(start_pos, min_samples, -frame_size):
+        frame_max = float(np.max(abs_audio[idx : idx + frame_size]))
+        if frame_max > threshold:
+            last_active_idx = min(len(audio), idx + frame_size + margin_samples)
+            break
+    else:
+        last_active_idx = len(audio)
+
+    return audio[:last_active_idx]
+
+
+# ===========================================================================
 # OpenVINO Kokoro Engine Wrapper
 # ===========================================================================
 class KokoroEngine:
@@ -685,10 +739,20 @@ class KokoroEngine:
         device: str = "CPU",
         threads: Optional[int] = None,
         cache_dir: Optional[Union[str, Path]] = None,
+        use_bucketing: Optional[bool] = None,
+        bucket_sizes: Optional[List[int]] = None,
     ) -> None:
         self.model_file = model_file
         self.device = device.upper()
         self.threads = threads
+
+        # 确定是否启用分桶（GPU/HETERO 模式默认开启，消除 JIT 重编译卡顿；CPU 原生支持动态维度默认关闭）
+        if use_bucketing is None:
+            self.use_bucketing = "GPU" in self.device
+        else:
+            self.use_bucketing = bool(use_bucketing)
+
+        self.bucket_sizes = sorted(bucket_sizes) if bucket_sizes else DEFAULT_BUCKET_SIZES
 
         # 1. 探测可写入的缓存目录（自动兼容 Docker 容器中的只读模型目录挂载）
         resolved_cache: Optional[Path] = None
@@ -756,6 +820,15 @@ class KokoroEngine:
         self.compiled_model = compiled
         logger.info(t("log.model_ready"))
 
+        bucketing_status = "Enabled" if self.use_bucketing else "Disabled"
+        logger.info(
+            t(
+                "log.bucketing_info",
+                status=bucketing_status,
+                buckets=self.bucket_sizes if self.use_bucketing else "N/A",
+            )
+        )
+
     def synthesize_tokens(
         self,
         token_ids: np.ndarray,
@@ -763,13 +836,26 @@ class KokoroEngine:
         speed: float = 1.0,
     ) -> bytes:
         """Run acoustic model inference to produce 16-bit 24kHz PCM bytes."""
+        orig_token_len = token_ids.shape[1]
+        is_padded = False
+
+        # 如果开启了 Shape 分桶，将输入强制填充到预设的固定尺寸，杜绝 GPU JIT 重新编译
+        if self.use_bucketing and orig_token_len < self.bucket_sizes[-1]:
+            target_len = find_bucket_size(orig_token_len, self.bucket_sizes)
+            if target_len > orig_token_len:
+                pad_width = target_len - orig_token_len
+                token_ids = np.pad(
+                    token_ids, ((0, 0), (0, pad_width)), mode="constant", constant_values=0
+                )
+                is_padded = True
+
         token_len = token_ids.shape[1]
 
         if style.ndim == 2:
-            idx = min(token_len, len(style) - 1)
+            idx = min(orig_token_len, len(style) - 1)
             style_vec = style[idx : idx + 1]
         elif style.ndim == 3:
-            idx = min(token_len, len(style) - 1)
+            idx = min(orig_token_len, len(style) - 1)
             style_vec = style[idx]
         elif style.ndim == 1:
             style_vec = style[np.newaxis, :]
@@ -793,6 +879,10 @@ class KokoroEngine:
             audio = audio.flatten()
         else:
             audio = np.array(audio).flatten()
+
+        # 如果输入进行了分桶填充，切除末尾因填充而多生成的静音
+        if is_padded:
+            audio = trim_trailing_silence(audio, sample_rate=24000)
 
         audio = np.clip(audio, -1.0, 1.0)
         pcm_data = (audio * 32767.0).astype(np.int16).tobytes()
@@ -1028,6 +1118,11 @@ def main(
         "-c",
         help=t("cli.options.max_chunk_chars"),
     ),
+    bucket_shapes: Optional[bool] = typer.Option(
+        None,
+        "--bucket-shapes/--no-bucket-shapes",
+        help=t("cli.options.bucket_shapes"),
+    ),
     language: str = typer.Option(
         "auto",
         "--language",
@@ -1077,6 +1172,7 @@ def main(
         device=device,
         threads=threads,
         cache_dir=cache_dir,
+        use_bucketing=bucket_shapes,
     )
 
     g2p_manager = MultiLangG2P(
@@ -1127,8 +1223,19 @@ def main(
         warm_style = get_or_blend_voice(voices, selected_default_voice)
         engine.synthesize_tokens(warm_tokens, warm_style, speed=1.0)
 
-        # 针对 GPU/HETERO 执行多尺度动态序列预热，将多尺寸内核预先编译写入 CACHE_DIR 磁盘缓存中
-        if "GPU" in engine.device:
+        # 针对开启了 Shape 分桶的模式，精确预热所有固定档位内核，启动后 100% 命中缓存
+        if engine.use_bucketing:
+            logger.info(t("log.gpu_bucket_warmup", buckets=engine.bucket_sizes))
+            for b_len in engine.bucket_sizes:
+                try:
+                    dummy_tok = np.ones((1, b_len), dtype=np.int64)
+                    dummy_tok[0, 0] = 0
+                    dummy_tok[0, -1] = 0
+                    engine.synthesize_tokens(dummy_tok, warm_style, speed=1.0)
+                except Exception as wex:
+                    logger.debug(f"Bucket warm-up skipped for size {b_len}: {wex}")
+            logger.info(t("log.gpu_warmup_done"))
+        elif "GPU" in engine.device:
             logger.info(t("log.gpu_warmup"))
             warmup_lengths = [16, 32, 48, 64, 96, 128, 160]
             for wlen in warmup_lengths:
