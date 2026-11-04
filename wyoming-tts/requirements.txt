@@ -12,8 +12,10 @@ openvino>=2024.0
 torch
 
 # Kokoro TTS frontend & multilingual support (kokoro is optional; fallback to misaki when absent)
+# Note: misaki[ja] pulls in full 'unidic' which requires external manual download (~1GB).
+# We use misaki[en,zh] here and explicitly provide self-contained 'unidic-lite' below.
 kokoro>=0.8.4
-misaki[en,ja,zh]>=0.4.0
+misaki[en,zh]>=0.4.0
 
 # Audio and scientific computing
 numpy>=1.24.0

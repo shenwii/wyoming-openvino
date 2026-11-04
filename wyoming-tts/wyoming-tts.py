@@ -302,6 +302,18 @@ class MultiLangG2P:
                     return en.G2P(trf=False, british=(lang_code == "b"))
 
             elif lang_code == "j":
+                # Ensure MeCab dictionary is properly directed:
+                # If unidic is installed but dictionary files are not downloaded,
+                # fallback to unidic-lite so fugashi doesn't crash on missing mecabrc.
+                try:
+                    import unidic
+                    dicdir = getattr(unidic, "DICDIR", None)
+                    if not dicdir or not os.path.exists(os.path.join(dicdir, "mecabrc")):
+                        import unidic_lite
+                        unidic.DICDIR = unidic_lite.DICDIR
+                except Exception:
+                    pass
+
                 from misaki import ja
                 logger.info(t("log.init_ja_g2p"))
                 return ja.JAG2P()
@@ -354,29 +366,41 @@ class MultiLangG2P:
                     from misaki import en
                     return en.G2P(trf=False)
 
-        except ImportError as exc:
+        except Exception as exc:
             install_cmd = {
                 "z": "pip install 'misaki[zh]'",
-                "j": "pip install 'misaki[ja]'",
+                "j": "pip install unidic-lite",
                 "a": "pip install 'misaki[en]'",
                 "b": "pip install 'misaki[en]'",
             }.get(lang_code, "pip install misaki")
             msg = f"Failed to load G2P engine for '{lang_code}', please install: {install_cmd} ({exc})"
             logger.error(msg)
-            raise RuntimeError(msg) from exc
+            try:
+                from misaki import en
+                logger.warning(f"Falling back to basic English G2P for language '{lang_code}'")
+                return en.G2P(trf=False)
+            except Exception:
+                raise RuntimeError(msg) from exc
 
     def text_to_tokens(self, text: str, language: Optional[Union[str, object]] = None) -> np.ndarray:
         """Convert single sentence text to Kokoro token ID sequence."""
         if callable(language):
             g2p_engine = language
         else:
-            g2p_engine, _ = self.get_g2p(language)
+            try:
+                g2p_engine, _ = self.get_g2p(language)
+            except Exception as e:
+                logger.warning(t("log.g2p_error", text=text, error=str(e)))
+                g2p_engine = None
 
-        try:
-            res = g2p_engine(text)
-        except Exception as e:
-            logger.warning(t("log.g2p_error", text=text, error=str(e)))
+        if g2p_engine is None:
             res = text
+        else:
+            try:
+                res = g2p_engine(text)
+            except Exception as e:
+                logger.warning(t("log.g2p_error", text=text, error=str(e)))
+                res = text
 
         from inspect import isgenerator
         if isgenerator(res) or hasattr(res, "__next__"):
@@ -932,23 +956,31 @@ class TTSEventHandler(AsyncEventHandler):
                 elif re.search(r"^[a-zA-Z0-9\s\.,!\?'-]+$", chunk_text):
                     chunk_lang = "en"
 
-                tokens = await loop.run_in_executor(
-                    None,
-                    self.g2p_manager.text_to_tokens,
-                    chunk_text,
-                    chunk_lang,
-                )
+                try:
+                    tokens = await loop.run_in_executor(
+                        None,
+                        self.g2p_manager.text_to_tokens,
+                        chunk_text,
+                        chunk_lang,
+                    )
+                except Exception as e:
+                    logger.error(f"Error converting text to tokens for '{chunk_text}': {e}", exc_info=True)
+                    continue
 
                 if tokens.shape[1] <= 2:
                     continue
 
-                pcm_data = await loop.run_in_executor(
-                    None,
-                    self.engine.synthesize_tokens,
-                    tokens,
-                    voice_style,
-                    req_speed,
-                )
+                try:
+                    pcm_data = await loop.run_in_executor(
+                        None,
+                        self.engine.synthesize_tokens,
+                        tokens,
+                        voice_style,
+                        req_speed,
+                    )
+                except Exception as e:
+                    logger.error(f"Error synthesizing tokens for '{chunk_text}': {e}", exc_info=True)
+                    continue
 
                 t_cost = time.perf_counter() - t_start
                 if not pcm_data:
