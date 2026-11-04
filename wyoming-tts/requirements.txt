@@ -1,5 +1,6 @@
 # ===========================================================================
 # Wyoming TTS (Text-to-Speech - Kokoro OpenVINO Multilingual) Dependencies
+# Lightweight No-Torch Edition (Pure CPU & OpenVINO Inference)
 # ===========================================================================
 
 # Wyoming protocol core library
@@ -8,14 +9,10 @@ wyoming>=1.5.0
 # Intel OpenVINO core inference engine
 openvino>=2024.0
 
-# PyTorch (Optional: only needed for loading complex .pt voice weights; excluded in lightweight build)
-torch
-
-# Kokoro TTS frontend & multilingual support (kokoro is optional; fallback to misaki when absent)
-# Note: misaki[ja] pulls in full 'unidic' which requires external manual download (~1GB).
-# We use misaki[en,zh] here and explicitly provide self-contained 'unidic-lite' below.
-kokoro>=0.8.4
-misaki[en,zh]>=0.4.0
+# Misaki G2P frontend for multilingual phonemization
+# Note: Base misaki package has no torch dependency. Language dependencies
+# (en: spacy/num2words, zh: jieba/pypinyin, ja: unidic-lite/fugashi) are explicitly listed below.
+misaki>=0.4.0
 
 # Audio and scientific computing
 numpy>=1.24.0

@@ -46,9 +46,11 @@ wyoming-openvino/
 │   ├── wyoming-tts.sh        # Shell 入口启动脚本
 │   ├── i18n.py               # 国际化引擎
 │   ├── lang/                 # 语言映射包 (en.json, zh.json, ja.json, ko.json)
-│   ├── requirements.txt      # TTS 依赖清单
-│   ├── Dockerfile            # 轻量容器构建文件 (默认，不含 PyTorch)
-│   └── Dockerfile.torch      # 包含 PyTorch 支持的容器构建文件
+│   ├── requirements.txt      # TTS 依赖清单 (默认轻量 No-Torch 版)
+│   ├── requirements-torch.txt# TTS 依赖清单 (原版 / 包含 PyTorch)
+│   ├── Dockerfile            # 轻量容器构建文件 (默认 No-Torch，适合 GitHub 发布)
+│   ├── Dockerfile.no-torch   # 轻量容器构建文件 (同 Dockerfile)
+│   └── Dockerfile.torch      # 原版包含 PyTorch 容器构建文件 (本地自编译版)
 │
 ├── wyoming-wakeword/         # 唤醒词服务 (openWakeWord OpenVINO)
 │   ├── wyoming-wakeword.py   # Python 服务脚本
@@ -138,10 +140,10 @@ python train.py --export-only --quantize
 # 构建 STT 镜像
 docker build -t wyoming-stt ./wyoming-stt
 
-# 构建 TTS 镜像 (默认轻量版，不包含 PyTorch，体积缩小约 2GB)
+# 构建 TTS 镜像 (默认轻量 No-Torch 版，纯 CPU / OpenVINO，体积仅约 1.5GB，适合推送到 GitHub 仓库)
 docker build -t wyoming-tts ./wyoming-tts
 
-# 或构建包含 PyTorch 的 TTS 镜像 (支持直接加载复杂 .pt 声音权重)
+# 或本地自行编译原版包含 PyTorch 的 TTS 镜像 (支持原生 Kokoro 库与复杂 .pt 权重，包含全量 CUDA/PyTorch 编译约 11GB)
 docker build -f ./wyoming-tts/Dockerfile.torch -t wyoming-tts:torch ./wyoming-tts
 
 # 构建 Wake Word 镜像

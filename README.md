@@ -46,9 +46,11 @@ wyoming-openvino/
 │   ├── wyoming-tts.sh        # Shell entrypoint command
 │   ├── i18n.py               # Internationalization engine
 │   ├── lang/                 # Translation catalogs (en.json, zh.json, ja.json, ko.json)
-│   ├── requirements.txt      # TTS dependencies
-│   ├── Dockerfile            # Lightweight container definition (No PyTorch, default)
-│   └── Dockerfile.torch      # Container definition with PyTorch support
+│   ├── requirements.txt      # TTS dependencies (Default lightweight No-Torch edition)
+│   ├── requirements-torch.txt# TTS dependencies (Full PyTorch edition)
+│   ├── Dockerfile            # Lightweight container definition (Default No-Torch, for GitHub / release)
+│   ├── Dockerfile.no-torch   # Lightweight container definition (Alias to Dockerfile)
+│   └── Dockerfile.torch      # Full container definition with PyTorch support (Local build edition)
 │
 ├── wyoming-wakeword/         # Wake Word Service (openWakeWord OpenVINO)
 │   ├── wyoming-wakeword.py   # Python service
@@ -138,10 +140,10 @@ All microservices use `docker.io/openvino/ubuntu24_runtime:latest` as the base i
 # Build STT image
 docker build -t wyoming-stt ./wyoming-stt
 
-# Build TTS image (Default lightweight version without PyTorch, ~2GB smaller)
+# Build TTS image (Default lightweight No-Torch edition, pure CPU / OpenVINO, ~1.5GB, suitable for GitHub registry)
 docker build -t wyoming-tts ./wyoming-tts
 
-# Or build TTS image with PyTorch (for loading .pt voice weights)
+# Or build full TTS image locally with PyTorch & Kokoro support (includes full CUDA/PyTorch stack ~11GB)
 docker build -f ./wyoming-tts/Dockerfile.torch -t wyoming-tts:torch ./wyoming-tts
 
 # Build Wake Word image

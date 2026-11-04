@@ -1,5 +1,5 @@
 # ===========================================================================
-# Stage 1: Build environment (compile wheels including pyopenjtalk + PyTorch)
+# Stage 1: Build environment (compile wheels including pyopenjtalk, No PyTorch)
 # ===========================================================================
 FROM docker.io/openvino/ubuntu24_runtime:latest AS builder
 
@@ -16,12 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 COPY requirements.txt .
-# Compile and package wheels for all requirements.
-# Use PyTorch CPU wheel index to avoid downloading unnecessary ~3GB NVIDIA CUDA packages.
-RUN pip wheel --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu --wheel-dir=/build/wheels -r requirements.txt
+# Compile and package wheels for lightweight requirements (No PyTorch, No CUDA)
+RUN pip wheel --no-cache-dir --wheel-dir=/build/wheels -r requirements.txt
 
 # ===========================================================================
-# Stage 2: Clean runtime environment (Full, With PyTorch)
+# Stage 2: Clean runtime environment (Lightweight No-Torch, ~1.5GB)
 # ===========================================================================
 FROM docker.io/openvino/ubuntu24_runtime:latest
 

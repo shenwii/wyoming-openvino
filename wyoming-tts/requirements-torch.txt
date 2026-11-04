@@ -1,0 +1,14 @@
+# ===========================================================================
+# Wyoming TTS (Text-to-Speech - Full Edition with PyTorch & Kokoro)
+# For local compilation when PyTorch or complex .pt voice loading is needed
+# ===========================================================================
+
+# Base lightweight dependencies
+-r requirements.txt
+
+# PyTorch
+torch
+
+# Kokoro TTS frontend & neural pipeline dependencies
+kokoro>=0.8.4
+transformers

@@ -46,9 +46,11 @@ wyoming-openvino/
 │   ├── wyoming-tts.sh        # 셸 진입점 스크립트
 │   ├── i18n.py               # 국제화 엔진
 │   ├── lang/                 # 언어 카탈로그 (en.json, zh.json, ja.json, ko.json)
-│   ├── requirements.txt      # TTS 의존성 목록
-│   ├── Dockerfile            # 경량 컨테이너 정의 (기본, PyTorch 없음)
-│   └── Dockerfile.torch      # PyTorch 지원 컨테이너 정의
+│   ├── requirements.txt      # TTS 의존성 목록 (기본 경량 No-Torch 버전)
+│   ├── requirements-torch.txt# TTS 의존성 목록 (PyTorch 포함 버전)
+│   ├── Dockerfile            # 경량 컨테이너 정의 (기본 No-Torch, GitHub 배포용)
+│   ├── Dockerfile.no-torch   # 경량 컨테이너 정의 (Dockerfile 별칭)
+│   └── Dockerfile.torch      # PyTorch 지원 컨테이너 정의 (로컬 빌드용)
 │
 ├── wyoming-wakeword/         # 호출어 서비스 (openWakeWord OpenVINO)
 │   ├── wyoming-wakeword.py   # Python 서비스 스크립트
@@ -116,10 +118,10 @@ pip install -r requirements.txt
 # STT 이미지 빌드
 docker build -t wyoming-stt ./wyoming-stt
 
-# TTS 이미지 빌드 (기본 경량 버전, PyTorch 없음, 약 2GB 절약)
+# TTS 이미지 빌드 (기본 경량 No-Torch 버전, CPU / OpenVINO 전용, 약 1.5GB, GitHub 저장소 배포용)
 docker build -t wyoming-tts ./wyoming-tts
 
-# 또는 PyTorch 지원 TTS 이미지 빌드 (.pt 형식 음성 가중치 직접 로딩용)
+# 또는 로컬에서 PyTorch 지원 TTS 이미지 빌드 (전체 CUDA/PyTorch 스택 포함 약 11GB)
 docker build -f ./wyoming-tts/Dockerfile.torch -t wyoming-tts:torch ./wyoming-tts
 
 # Wake Word 이미지 빌드
