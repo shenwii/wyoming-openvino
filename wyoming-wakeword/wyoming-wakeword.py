@@ -112,6 +112,7 @@ class SingleModelConfig:
     sliding_window_size: Optional[int] = None
     trailing_fall: Optional[bool] = None
     max_trailing_frames: Optional[int] = None
+    trailing_raw_cutoff: Optional[float] = None
     device: Optional[str] = None
     languages: List[str] = field(default_factory=lambda: ["en"])
 
@@ -129,6 +130,7 @@ class WakewordServerConfig:
     default_sliding_window_size: int = 1
     default_trailing_fall: bool = True
     default_max_trailing_frames: int = 8
+    default_trailing_raw_cutoff: float = 0.20
     melspec_model_path: Optional[str] = None
     melspec_device: Optional[str] = None
     embedding_model_path: Optional[str] = None
@@ -293,6 +295,7 @@ class LoadedClassifier:
         trailing_fall: bool = True,
         max_trailing_frames: int = 8,
         trailing_drop_ratio: float = 0.25,
+        trailing_raw_cutoff: float = 0.20,
     ) -> None:
         self.config = config
         self.compiled_model = compiled_model
@@ -306,6 +309,7 @@ class LoadedClassifier:
         self._trailing_fall = bool(trailing_fall)
         self._max_trailing_frames = max(1, int(max_trailing_frames))
         self._trailing_drop_ratio = max(0.0, min(1.0, float(trailing_drop_ratio)))
+        self._trailing_raw_cutoff = max(0.0, float(trailing_raw_cutoff))
         self.last_triggered_time: float = 0.0
 
     @property
@@ -363,6 +367,14 @@ class LoadedClassifier:
     @trailing_drop_ratio.setter
     def trailing_drop_ratio(self, value: float) -> None:
         self._trailing_drop_ratio = max(0.0, min(1.0, float(value)))
+
+    @property
+    def trailing_raw_cutoff(self) -> float:
+        return self._trailing_raw_cutoff
+
+    @trailing_raw_cutoff.setter
+    def trailing_raw_cutoff(self, value: float) -> None:
+        self._trailing_raw_cutoff = max(0.0, float(value))
 
     @property
     def refractory(self) -> float:
@@ -516,6 +528,7 @@ class WakeWordEngine:
         sliding_window_size = m_cfg.sliding_window_size if m_cfg.sliding_window_size is not None else self.config.default_sliding_window_size
         trailing_fall = m_cfg.trailing_fall if m_cfg.trailing_fall is not None else self.config.default_trailing_fall
         max_trailing_frames = m_cfg.max_trailing_frames if m_cfg.max_trailing_frames is not None else self.config.default_max_trailing_frames
+        trailing_raw_cutoff = m_cfg.trailing_raw_cutoff if m_cfg.trailing_raw_cutoff is not None else self.config.default_trailing_raw_cutoff
 
         path = Path(m_cfg.model_path).expanduser().resolve()
         if not path.exists():
@@ -578,6 +591,7 @@ class WakeWordEngine:
             sliding_window_size=sliding_window_size,
             trailing_fall=trailing_fall,
             max_trailing_frames=max_trailing_frames,
+            trailing_raw_cutoff=trailing_raw_cutoff,
         )
         self.classifiers[m_cfg.name] = classifier
         logger.info(
@@ -813,11 +827,16 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
 
                 should_release = False
                 release_reason = ""
+                raw_cutoff = min(model.trailing_raw_cutoff, model.cutoff)
                 # 1. Dropped below cutoff (end of wake word, entering silence / inter-phrase pause)
                 if eval_score < model.cutoff:
                     should_release = True
                     release_reason = f"fell below cutoff ({eval_score:.4f} < {model.cutoff:.2f})"
-                # 2. Significant drop from peak (e.g. dropped by 25% from peak and delta >= 0.10)
+                # 2. Instantaneous raw frame score collapsed below raw cutoff (e.g. < 0.20): sound stopped, bypassing window lag
+                elif score < raw_cutoff:
+                    should_release = True
+                    release_reason = f"raw frame score collapsed ({score:.4f} < {raw_cutoff:.2f}, window lag bypassed)"
+                # 3. Significant drop from peak (e.g. dropped by 25% from peak and delta >= 0.10)
                 elif (
                     peak >= model.cutoff
                     and eval_score <= peak * (1.0 - model.trailing_drop_ratio)
@@ -825,7 +844,7 @@ class OpenVINOWakewordHandler(AsyncEventHandler):
                 ):
                     should_release = True
                     release_reason = f"dropped from peak ({eval_score:.4f} vs peak {peak:.4f})"
-                # 3. Maximum wait frames reached (safety guard against hanging on prolonged high sound)
+                # 4. Maximum wait frames reached (safety guard against hanging on prolonged high sound)
                 elif p_frames >= model.max_trailing_frames:
                     should_release = True
                     release_reason = f"max frames reached ({p_frames} >= {model.max_trailing_frames})"
@@ -980,6 +999,12 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         or raw_dict.get("trailing_frames"),
         8,
     )
+    default_trailing_raw_cutoff = _safe_float(
+        raw_dict.get("default_trailing_raw_cutoff")
+        or raw_dict.get("trailing_raw_cutoff")
+        or raw_dict.get("raw_cutoff"),
+        0.20,
+    )
 
     melspec_model = feat_sec.get("melspec_model") or raw_dict.get("melspec_model")
     melspec_device = feat_sec.get("melspec_device") or raw_dict.get("melspec_device")
@@ -997,6 +1022,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         default_sliding_window_size=default_sliding_window_size,
         default_trailing_fall=default_trailing_fall,
         default_max_trailing_frames=default_max_trailing_frames,
+        default_trailing_raw_cutoff=default_trailing_raw_cutoff,
         melspec_model_path=str(melspec_model) if melspec_model else None,
         melspec_device=str(melspec_device) if melspec_device else None,
         embedding_model_path=str(embedding_model) if embedding_model else None,
@@ -1019,6 +1045,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
         sliding_window_size_raw = item.get("sliding_window_size") or item.get("window_size")
         trailing_fall_raw = item.get("trailing_fall")
         max_trailing_frames_raw = item.get("max_trailing_frames") or item.get("trailing_frames")
+        trailing_raw_cutoff_raw = item.get("trailing_raw_cutoff") or item.get("raw_cutoff")
 
         model_entry = SingleModelConfig(
             name=str(m_name),
@@ -1030,6 +1057,7 @@ def load_config_file(config_path: Path) -> WakewordServerConfig:
             sliding_window_size=_safe_int(sliding_window_size_raw, cfg.default_sliding_window_size) if sliding_window_size_raw is not None else None,
             trailing_fall=_safe_bool(trailing_fall_raw, cfg.default_trailing_fall) if trailing_fall_raw is not None else None,
             max_trailing_frames=_safe_int(max_trailing_frames_raw, cfg.default_max_trailing_frames) if max_trailing_frames_raw is not None else None,
+            trailing_raw_cutoff=_safe_float(trailing_raw_cutoff_raw, cfg.default_trailing_raw_cutoff) if trailing_raw_cutoff_raw is not None else None,
             device=item.get("device"),
             languages=item.get("languages", ["en"]),
         )
@@ -1098,6 +1126,12 @@ def main(
         "--trailing-frames",
         help=t("cli.options.max_trailing_frames"),
     ),
+    trailing_raw_cutoff: Optional[float] = typer.Option(
+        None,
+        "--trailing-raw-cutoff",
+        "--raw-cutoff",
+        help=t("cli.options.trailing_raw_cutoff"),
+    ),
     refractory: Optional[float] = typer.Option(
         None,
         "--refractory",
@@ -1162,6 +1196,8 @@ def main(
         server_config.default_trailing_fall = trailing_fall
     if max_trailing_frames is not None:
         server_config.default_max_trailing_frames = max(1, max_trailing_frames)
+    if trailing_raw_cutoff is not None:
+        server_config.default_trailing_raw_cutoff = max(0.0, trailing_raw_cutoff)
     if refractory is not None:
         server_config.default_refractory = refractory
     if melspec_model is not None:
@@ -1186,6 +1222,7 @@ def main(
                 sliding_window_size=sliding_window_size,
                 trailing_fall=trailing_fall,
                 max_trailing_frames=max_trailing_frames,
+                trailing_raw_cutoff=trailing_raw_cutoff,
                 device=device,
             )
             existing_idx = next(
@@ -1217,6 +1254,7 @@ def main(
                             sliding_window_size=sliding_window_size,
                             trailing_fall=trailing_fall,
                             max_trailing_frames=max_trailing_frames,
+                            trailing_raw_cutoff=trailing_raw_cutoff,
                             device=device,
                         )
                     )

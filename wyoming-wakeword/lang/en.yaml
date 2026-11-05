@@ -10,6 +10,7 @@ cli:
     sliding_window_size: "Sliding window size for score smoothing (computes rolling average over the last N frames to suppress transient false positives) [default: 1]"
     trailing_fall: "Enable trailing-edge/peak-fall triggering (waits for wake word articulation to complete and score to drop before firing, preventing tail cutoff and STT pollution) [default: True]"
     max_trailing_frames: "Maximum trailing frames to wait for score drop before forced trigger (timeout safety guard, 80ms per frame) [default: 8]"
+    trailing_raw_cutoff: "Instantaneous raw score floor for fast release (fires immediately when single frame drops below this, bypassing sliding window drain lag) [default: 0.20]"
     refractory: "Default refractory period in seconds after trigger [default: 2.0]"
     host: "Server listening host address [default: 0.0.0.0]"
     port: "Server listening port [default: 10400]"
