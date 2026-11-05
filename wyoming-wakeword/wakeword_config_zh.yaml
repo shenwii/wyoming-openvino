@@ -1,0 +1,93 @@
+# ===========================================================================
+# Wyoming 唤醒词服务配置文件 (中文示例)
+# ===========================================================================
+# 本文件用于配置 OpenVINO 硬件加速以及多唤醒词并发监听的各项核心参数。
+#
+# 使用方式:
+#   python wyoming-wakeword.py --config wakeword_config_zh.yaml
+# ===========================================================================
+
+# --- 1. 服务网络通信配置 (Server Network Configuration) ---
+server:
+  host: "0.0.0.0"       # 监听网络地址 (0.0.0.0 允许局域网外部接入，如 Home Assistant)
+  port: 10400           # 监听端口 (Wyoming openWakeWord 标准端口为 10400)
+  log_level: "INFO"     # 日志级别: DEBUG / INFO / WARNING / ERROR
+
+# --- 2. 全局默认推理与高级触发参数 (Global Inference & Detection Settings) ---
+# 下列参数为全局缺省值；各个模型可在下方的 models 列表中单独重载覆盖。
+
+default_device: "NPU"   # 默认计算设备: NPU (Intel Core Ultra NPU) / GPU / CPU / AUTO
+                        # 具备智能硬件回退机制: 优先 NPU -> 失败回退 GPU -> 失败回退 CPU
+
+default_cutoff: 0.70    # 默认置信度阈值 (0.0 ~ 1.0)，建议 0.60 ~ 0.80
+
+default_refractory: 2.0 # 默认触发冷却防重时间 (秒)，触发后指定时间内忽略该模型，防止重复响应
+
+default_trigger_level: 2
+# 【参数说明: 连续防抖帧数 trigger_level】
+# 作用: 必须连续 N 帧（每帧 80ms）计算得分均 >= cutoff 时才确认命中。
+# 场景: 专门用于过滤电视声、背景音乐中突发偶现的单帧高分毛刺。
+# 推荐值: 1 (瞬时触发，极速响应) 或 2 (连续 160ms 命中，强效防误报，推荐)
+
+default_sliding_window_size: 3
+# 【参数说明: 滑动窗口大小 sliding_window_size】
+# 作用: 维护最近 N 帧得分的滑动窗口移动平均值（Rolling Average，1帧=80ms）。
+# 场景: 彻底抹平突发的单帧 0.99 虚高尖峰（例如 3 帧平均: [0.05, 0.99, 0.08]/3 = 0.373，完全低于阈值）。
+# 推荐值: 1 (不平滑)，3 (平滑 240ms，推荐日常使用)，5 (平滑 400ms，适合高误报嘈杂环境)
+
+default_trailing_fall: true
+# 【参数说明: 过峰回落释放机制 trailing_fall】
+# 作用: 达标后不立即截断音频，而是先进入 PENDING 挂起态，等待整句唤醒词发音完毕、分数从波峰回落后再发送 Detection 事件。
+# 场景: 彻底解决传统“前沿早触发”导致唤醒词念到一半被掐断、最后尾音（如“灵”）被录入 STT 导致识别成“灵帮我开灯”的工程痛点！
+#       回落释放正好切中人机交互中唤醒词发音结束后的 0.3~0.5s 自然停顿窗口。
+# 推荐值: true (默认开启，强烈推荐)
+
+default_max_trailing_frames: 8
+# 【参数说明: 过峰回落最大等待帧数 max_trailing_frames】
+# 作用: 进入 PENDING 挂起状态后的超时保底上限（每帧 80ms，8 帧约 640ms）。
+# 场景: 防止因用户拉长音叫喊或持续高底噪导致分数迟迟不下降而造成卡死，达到上限时强制释放触发。
+# 推荐值: 8 (~640ms) 或 10 (~800ms)
+
+default_trailing_raw_cutoff: 0.20
+# 【参数说明: 单帧骤降快退门槛 trailing_raw_cutoff】
+# 作用: 在挂起等待回落期间，只要当前最新单帧的“原始预测分”跌破此门槛，立即释放触发！
+# 场景: 当 sliding_window_size 较大时，滑动窗口均值存在“排空滞后”。当用户声音一停（进入静音或开始说命令），
+#       单帧原始分会断崖式暴跌至 0.01~0.05。此门槛可实现秒级响应，彻底绕过滑动窗口均值的历史滞后。
+# 推荐值: 0.20 (既能稳定高于环境背景底噪 0.05~0.12，又远低于正常发音时的 0.60+)
+
+# --- 3. openWakeWord 基础声学特征提取模型 (可选) ---
+# 若未指定或本地不存在，服务将自动从 openwakeword 模块或官方仓库下载至 models/ 目录
+feature_models:
+  melspec_model: "models/melspectrogram.onnx"
+  # melspec_device: "CPU" # 可选: melspectrogram 包含动态 STFT，若 NPU 不支持静态 reshape 会自动回退至 CPU
+  embedding_model: "models/embedding_model.onnx"
+  # embedding_device: "NPU"
+
+# --- 4. 唤醒词多模型并发监听列表 (Models List) ---
+# 每个模型可独立设置自己的阈值、防抖帧数、滑动窗口以及计算设备
+models:
+  # 示例 1: 英文唤醒词 Hey Jarvis
+  - name: "hey_jarvis"
+    phrase: "Hey Jarvis"
+    model_path: "models/hey_jarvis_v0.1.onnx"
+    cutoff: 0.60
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 3.0
+    device: "NPU"
+    languages:
+      - "en"
+
+  # 示例 2: 英文唤醒词 Alexa
+  - name: "alexa"
+    phrase: "Alexa"
+    model_path: "models/alexa_v0.1.onnx"
+    cutoff: 0.50
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 2.0
+    device: "NPU"
+    languages:
+      - "en"

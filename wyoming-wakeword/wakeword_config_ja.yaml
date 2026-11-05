@@ -1,0 +1,94 @@
+# ===========================================================================
+# Wyoming ウェイクワードサービス設定ファイル (日本語サンプル)
+# ===========================================================================
+# 本ファイルは OpenVINO ハードウェアアクセラレーションおよび複数ウェイクワードの
+# 同時検出パラメータを設定するための構成ファイルです。
+#
+# 使用方法:
+#   python wyoming-wakeword.py --config wakeword_config_ja.yaml
+# ===========================================================================
+
+# --- 1. サーバーネットワーク設定 (Server Network Configuration) ---
+server:
+  host: "0.0.0.0"       # リッスンアドレス (0.0.0.0 で LAN 内の Home Assistant 等からの接続を許可)
+  port: 10400           # リッスンポート (Wyoming openWakeWord 標準ポートは 10400)
+  log_level: "INFO"     # ログ記録レベル: DEBUG / INFO / WARNING / ERROR
+
+# --- 2. グローバルデフォルト推論・高度トリガー設定 (Global Detection Settings) ---
+# 以下のパラメータは全体のデフォルト値です。各モデルは models リスト内で個別にオーバーライド可能です。
+
+default_device: "NPU"   # デフォルト推論デバイス: NPU (Intel Core Ultra NPU) / GPU / CPU / AUTO
+                        # 自動フォールバック機能搭載: 優先 NPU -> 失敗時 GPU -> 失敗時 CPU
+
+default_cutoff: 0.70    # デフォルト検出信頼度しきい値 (0.0 - 1.0)、0.60 - 0.80 推奨
+
+default_refractory: 2.0 # トリガー後の不応期 (秒)、重複トリガーを防止
+
+default_trigger_level: 2
+# 【パラメータ説明: 連続判定防振フレーム数 trigger_level】
+# 役割: 連続 N フレーム (1フレーム=80ms) 計算スコアが >= cutoff を満たした場合にのみトリガーを確定します。
+# 用途: テレビ音声や音楽などによる突発的な単一フレームの誤検知スパイクを強力に除外します。
+# 推奨値: 1 (即時トリガー、低レイテンシ) または 2 (160ms 連続判定、誤検知防止推奨)
+
+default_sliding_window_size: 3
+# 【パラメータ説明: スライディングウィンドウサイズ sliding_window_size】
+# 役割: 直近 N フレームの予測スコアの移動平均 (Rolling Average) を計算します。
+# 用途: 単一フレームでの 0.99 などの誤検知スパイクを平均化して抑制します (例: 3フレーム平均 [0.05, 0.99, 0.08]/3 = 0.373)。
+# 推奨値: 1 (平滑化なし)、3 (240ms ウィンドウ、通常利用推奨)、5 (400ms、騒音環境向け)
+
+default_trailing_fall: true
+# 【パラメータ説明: ピーク下降トリガー trailing_fall】
+# 役割: 条件を満たした際に即座にトリガーせず、PENDING 状態に入り、ウェイクワードの発話完了とスコア下降を待ってから Detection を発行します。
+# 用途: 従来の立ち上がりトリガーでウェイクワードが途中で切断され、語尾が後続の STT (音声認識) に漏れてコマンド認識を阻害する問題を根本解決します！
+#       発話完了後の 0.3〜0.5秒の自然な休止区間に正確に発火します。
+# 推奨値: true (デフォルト有効、強く推奨)
+
+default_max_trailing_frames: 8
+# 【パラメータ説明: 下降待機最大フレーム数 max_trailing_frames】
+# 役割: PENDING 待機状態におけるタイムアウト保護上限 (1フレーム=80ms、8フレームは約640ms)。
+# 用途: 発声を長く引き伸ばしたり高騒音が継続した場合のハングアップを防ぎ、上限到達時に強制発火します。
+# 推奨値: 8 (~640ms) または 10 (~800ms)
+
+default_trailing_raw_cutoff: 0.20
+# 【パラメータ説明: 単一フレーム急降下即時解放しきい値 trailing_raw_cutoff】
+# 役割: 待機中、最新の単一フレームの「生スコア」がこのしきい値を下回った場合、即座にトリガーを発行します！
+# 用途: 大きなスライディングウィンドウにおける移動平均の排出遅延 (Lag) を解消します。発話が終了して無音や指示発話に入ると、
+#       生スコアは 0.01〜0.05 へと急落するため、即時解放により低遅延を実現します。
+# 推奨値: 0.20 (環境ノイズフロア 0.05〜0.12 より十分に高く、通常発話時の 0.60+ より十分に低い安全値)
+
+# --- 3. openWakeWord 基礎特徴抽出モデル (任意) ---
+# 省略時またはローカル未配置の場合、公式リポジトリから models/ へ自動ダウンロードされます
+feature_models:
+  melspec_model: "models/melspectrogram.onnx"
+  # melspec_device: "CPU" # 任意: melspectrogram の動的 STFT が NPU で未対応の場合は自動で CPU にフォールバック
+  embedding_model: "models/embedding_model.onnx"
+  # embedding_device: "NPU"
+
+# --- 4. 複数ウェイクワードモデル設定一覧 (Models List) ---
+# 各モデルはしきい値、防振フレーム数、スライディングウィンドウ、計算デバイスを個別に設定可能
+models:
+  # サンプル 1: Hey Jarvis (英語)
+  - name: "hey_jarvis"
+    phrase: "Hey Jarvis"
+    model_path: "models/hey_jarvis_v0.1.onnx"
+    cutoff: 0.60
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 3.0
+    device: "NPU"
+    languages:
+      - "en"
+
+  # サンプル 2: Alexa (英語)
+  - name: "alexa"
+    phrase: "Alexa"
+    model_path: "models/alexa_v0.1.onnx"
+    cutoff: 0.50
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 2.0
+    device: "NPU"
+    languages:
+      - "en"

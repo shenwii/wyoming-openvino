@@ -1,5 +1,5 @@
 # ===========================================================================
-# Wyoming Wake Word Service Configuration File
+# Wyoming Wake Word Service Configuration File (Sample)
 # ===========================================================================
 # This file configures OpenVINO hardware acceleration and concurrent detection
 # parameters for multiple wake word models.
@@ -8,54 +8,97 @@
 #   python wyoming-wakeword.py --config wakeword_config.yaml
 # ===========================================================================
 
-# --- Server Network Configuration ---
+# --- 1. Server Network Configuration ---
 server:
-  host: "0.0.0.0"       # Listen address (0.0.0.0 permits LAN connections such as Home Assistant)
+  host: "0.0.0.0"       # Listen address (0.0.0.0 allows LAN connections from Home Assistant, etc.)
   port: 10400           # Listen port (Wyoming openWakeWord default port is 10400)
-  log_level: "INFO"     # Log level: DEBUG / INFO / WARNING / ERROR
+  log_level: "INFO"     # Logging level: DEBUG / INFO / WARNING / ERROR
 
-# --- Global Default Inference & Detection Settings ---
+# --- 2. Global Default Inference & Advanced Detection Settings ---
+# These parameters serve as global defaults. Each model in the 'models' list
+# can independently override any of these options.
+
 default_device: "NPU"   # Default inference device: NPU (Intel Core Ultra NPU) / GPU / CPU / AUTO
                         # Features smart hardware fallback: NPU -> GPU -> CPU
-default_cutoff: 0.5     # Default confidence cutoff threshold (0.0 - 1.0), 0.5 - 0.7 recommended
-default_refractory: 2.0 # Default refractory period after trigger (seconds) to prevent duplicate triggers
 
-# --- openWakeWord Base Feature Extraction Models (Optional) ---
-# If omitted or left empty, the service locates or downloads from local models/, openwakeword pkg, or GitHub
+default_cutoff: 0.70    # Default confidence cutoff threshold (0.0 - 1.0), 0.60 - 0.80 recommended
+
+default_refractory: 2.0 # Default refractory period in seconds after trigger to prevent duplicate activations
+
+default_trigger_level: 2
+# [Parameter Description: Consecutive Debounce Frames (trigger_level)]
+# Purpose: Requires the model's score to stay >= cutoff for N consecutive chunks (80ms per chunk)
+#          before an activation is confirmed or enters the pending state.
+# Scenario: Filters out transient single-frame acoustic spikes caused by TV speech, background audio, etc.
+# Recommended: 1 (instant trigger, lowest latency) or 2 (requires 160ms sustained match, strong anti-false-alarm)
+
+default_sliding_window_size: 3
+# [Parameter Description: Sliding Window Size (sliding_window_size)]
+# Purpose: Maintains a rolling average over the last N frame scores (1 chunk = 80ms).
+#          Evaluation compares the rolling mean against cutoff instead of raw jumpy scores.
+# Scenario: Smooths out sporadic 0.99 false-positive spikes (e.g., 3-frame average [0.05, 0.99, 0.08] / 3 = 0.373,
+#          which stays completely below threshold).
+# Recommended: 1 (no smoothing), 3 (240ms window, recommended for everyday use), 5 (400ms, for noisy living rooms)
+
+default_trailing_fall: true
+# [Parameter Description: Trailing-Edge Peak & Fall Trigger (trailing_fall)]
+# Purpose: When trigger conditions are met, rather than prematurely emitting a Detection event in the middle
+#          of articulation, the engine enters a PENDING state and waits for the user to finish speaking
+#          and the score to fall from its peak before releasing the trigger.
+# Scenario: Eliminates the classic early-trigger issue where multi-syllable phrases are cut off midway
+#          and trailing phonemes (e.g. "...ling") bleed into Speech-To-Text (STT), polluting voice command recognition!
+#          Falling-edge release perfectly aligns with the natural 0.3 - 0.5s pause after the wake phrase.
+# Recommended: true (default, strongly recommended)
+
+default_max_trailing_frames: 8
+# [Parameter Description: Maximum Trailing Wait Frames (max_trailing_frames)]
+# Purpose: Safety timeout guard for the PENDING state (80ms per frame, 8 frames = ~640ms).
+# Scenario: Prevents hanging if the speaker draws out a very long syllable or ambient sound remains high;
+#          forces immediate release if the score has not fallen within this maximum frame limit.
+# Recommended: 8 (~640ms) or 10 (~800ms)
+
+default_trailing_raw_cutoff: 0.20
+# [Parameter Description: Instant Raw Score Collapse Floor (trailing_raw_cutoff)]
+# Purpose: While waiting for fall-off, if the latest single-frame raw prediction score abruptly collapses
+#          below this threshold, immediately release the trigger!
+# Scenario: Solves the rolling average "drain lag" when large sliding_window_size is used. When speech stops
+#          and enters silence or the subsequent command, the raw frame score drops to 0.01 - 0.05 instantly.
+#          This threshold bypasses window queue lag to deliver sub-100ms response time.
+# Recommended: 0.20 (safely above ambient room noise floor of 0.05 - 0.12, well below speech levels of 0.60+)
+
+# --- 3. openWakeWord Base Feature Extraction Models (Optional) ---
+# If omitted or missing locally, models are automatically downloaded to models/ from openwakeword or GitHub.
 feature_models:
   melspec_model: "models/melspectrogram.onnx"
-  # melspec_device: "NPU" # Optional: defaults to default_device with NPU -> GPU -> CPU fallback
+  # melspec_device: "CPU" # Optional: STFT in melspectrogram auto-falls back to CPU if NPU static reshape is unsupported
   embedding_model: "models/embedding_model.onnx"
+  # embedding_device: "NPU"
 
-# --- Wake Word Multi-Model List (Concurrent detection of multiple wake words) ---
-# Each model can independently override cutoff, refractory, and device
+# --- 4. Wake Word Multi-Model List (Concurrent detection of multiple wake words) ---
+# Each model can independently override cutoff, debounce, sliding window, and device.
 models:
-  # Example 1: Hey Jarvis
+  # Example 1: Hey Jarvis (English)
   - name: "hey_jarvis"
     phrase: "Hey Jarvis"
     model_path: "models/hey_jarvis_v0.1.onnx"
-    cutoff: 0.6            # Specific threshold to reduce false activations
-    refractory: 3.0        # 3 seconds refractory period
-    device: "NPU"          # Run on NPU
-    languages:
-      - "en"
-
-  # Example 2: Alexa
-  - name: "alexa"
-    phrase: "Alexa"
-    model_path: "models/alexa_v0.1.onnx"
-    cutoff: 0.5
-    refractory: 2.0
+    cutoff: 0.60
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 3.0
     device: "NPU"
     languages:
       - "en"
 
-  # Example 3: Custom wake word (e.g., custom trained model)
-  # - name: "custom_wakeword"
-  #   phrase: "Custom Wake Word"
-  #   model_path: "models/custom_wakeword.onnx"
-  #   cutoff: 0.55
-  #   refractory: 2.5
-  #   device: "NPU"
-  #   languages:
-  #     - "en"
+  # Example 2: Alexa (English)
+  - name: "alexa"
+    phrase: "Alexa"
+    model_path: "models/alexa_v0.1.onnx"
+    cutoff: 0.50
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 2.0
+    device: "NPU"
+    languages:
+      - "en"

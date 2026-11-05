@@ -1,0 +1,94 @@
+# ===========================================================================
+# Wyoming 호출어 서비스 구성 파일 (한국어 예제)
+# ===========================================================================
+# 본 파일은 OpenVINO 하드웨어 가속 및 다중 호출어 동시 감지 매개변수를
+# 설정하기 위한 구성 파일입니다.
+#
+# 사용 방법:
+#   python wyoming-wakeword.py --config wakeword_config_ko.yaml
+# ===========================================================================
+
+# --- 1. 서버 네트워크 통신 설정 (Server Network Configuration) ---
+server:
+  host: "0.0.0.0"       # 수신 호스트 주소 (0.0.0.0은 Home Assistant 등 LAN 외부 연결 허용)
+  port: 10400           # 수신 포트 (Wyoming openWakeWord 기본 포트는 10400)
+  log_level: "INFO"     # 로그 레벨: DEBUG / INFO / WARNING / ERROR
+
+# --- 2. 전역 기본 추론 및 고급 트리거 설정 (Global Detection Settings) ---
+# 아래 매개변수는 전역 기본값이며, 하단의 models 목록에서 모델별로 재정의할 수 있습니다.
+
+default_device: "NPU"   # 기본 추론 장치: NPU (Intel Core Ultra NPU) / GPU / CPU / AUTO
+                        # 스마트 하드웨어 대체 메커니즘 제공: NPU 우선 -> 실패 시 GPU -> 실패 시 CPU
+
+default_cutoff: 0.70    # 기본 신뢰도 임계값 (0.0 ~ 1.0), 0.60 ~ 0.80 권장
+
+default_refractory: 2.0 # 호출 감지 후 중복 방지 대기 시간 (초)
+
+default_trigger_level: 2
+# 【매개변수 설명: 연속 적중 디바운스 프레임 수 trigger_level】
+# 역할: 연속 N개 프레임(프레임당 80ms) 동안 계산 점수가 >= cutoff를 만족해야 트리거를 확정합니다.
+# 용도: TV 소리나 배경 음악 등으로 인한 일시적인 단일 프레임 오탐을 강력히 차단합니다.
+# 권장값: 1 (즉시 트리거, 최저 지연) 또는 2 (160ms 연속 일치 필요, 오탐 방지 권장)
+
+default_sliding_window_size: 3
+# 【매개변수 설명: 슬라이딩 윈도우 크기 sliding_window_size】
+# 역할: 최근 N개 프레임 점수의 이동 평균(Rolling Average)을 계산하여 임계값과 비교합니다.
+# 용도: 단일 프레임의 0.99 튀는 스파이크 점수를 평활화하여 상쇄합니다 (예: 3프레임 평균 [0.05, 0.99, 0.08]/3 = 0.373).
+# 권장값: 1 (평활화 미사용), 3 (240ms 윈도우, 일상 권장), 5 (400ms, 소음 환경용)
+
+default_trailing_fall: true
+# 【매개변수 설명: 피크 하강 트리거 메커니즘 trailing_fall】
+# 역할: 조건을 만족해도 즉시 음성을 끊지 않고 PENDING 상태로 대기하며, 호출어 발음이 완전히 끝나고 점수가 하강할 때 Detection 이벤트를 전송합니다.
+# 용도: 기존 방식에서 호출어가 중간에 잘려 끝 음절이 STT로 넘어가 명령어 인식을 방해하는 문제를 근본적으로 해결합니다!
+#       호출어 발음 종료 후의 0.3~0.5초 자연스러운 일시 정지 구간에서 정확히 반응합니다.
+# 권장값: true (기본 활성화, 적극 권장)
+
+default_max_trailing_frames: 8
+# 【매개변수 설명: 하강 대기 최대 프레임 수 max_trailing_frames】
+# 역할: PENDING 대기 상태에서의 타임아웃 보호 상한 (프레임당 80ms, 8프레임은 약 640ms).
+# 용도: 긴 소리를 지르거나 주변 소음이 지속될 때 멈추지 않고 상한 도달 시 즉시 강제 트리거합니다.
+# 권장값: 8 (~640ms) 또는 10 (~800ms)
+
+default_trailing_raw_cutoff: 0.20
+# 【매개변수 설명: 단일 프레임 급락 즉시 해제 임계값 trailing_raw_cutoff】
+# 역할: 대기 중 최신 단일 프레임의 '원시 점수'가 이 임계값 미만으로 급락하면 즉시 트리거를 해제합니다!
+# 용도: 큰 슬라이딩 윈도우 사용 시 발생하는 윈도우 배출 지연(Lag)을 방지합니다. 발음이 끝나고 묵음이나 명령어로 진입하면
+#       원시 점수가 0.01~0.05로 수직 하강하므로 즉각 반응합니다.
+# 권장값: 0.20 (주변 소음 0.05~0.12보다 충분히 높고 정상 발음 0.60+보다 훨씬 낮아 안전함)
+
+# --- 3. openWakeWord 기본 특징 추출 모델 (선택 사항) ---
+# 생략하거나 로컬에 없을 경우 models/ 디렉터리로 자동 다운로드됩니다.
+feature_models:
+  melspec_model: "models/melspectrogram.onnx"
+  # melspec_device: "CPU" # 선택: melspectrogram의 동적 STFT가 NPU에서 지원되지 않을 경우 CPU로 자동 대체
+  embedding_model: "models/embedding_model.onnx"
+  # embedding_device: "NPU"
+
+# --- 4. 호출어 다중 모델 동시 청취 목록 (Models List) ---
+# 각 모델은 임계값, 디바운스 프레임, 슬라이딩 윈도우 및 장치를 개별적으로 재정의할 수 있습니다.
+models:
+  # 예제 1: Hey Jarvis (영어)
+  - name: "hey_jarvis"
+    phrase: "Hey Jarvis"
+    model_path: "models/hey_jarvis_v0.1.onnx"
+    cutoff: 0.60
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 3.0
+    device: "NPU"
+    languages:
+      - "en"
+
+  # 예제 2: Alexa (영어)
+  - name: "alexa"
+    phrase: "Alexa"
+    model_path: "models/alexa_v0.1.onnx"
+    cutoff: 0.50
+    trigger_level: 1
+    sliding_window_size: 1
+    trailing_fall: true
+    refractory: 2.0
+    device: "NPU"
+    languages:
+      - "en"
