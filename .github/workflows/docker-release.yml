@@ -45,7 +45,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: shenwii/${{ matrix.image_name }}
+          images: ghcr.io/shenwii/${{ matrix.image_name }}
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.vars.outputs.version }}
